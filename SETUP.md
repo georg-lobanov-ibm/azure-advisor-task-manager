@@ -1,4 +1,4 @@
-# Azure Advisor Task Manager - Python Setup
+# Azure Advisor Task Manager - Python Setup with Claude Agent SDK
 
 ## Prerequisites
 
@@ -46,61 +46,57 @@ source .env
 ```
 src/advisor_agent/
 ├── __init__.py
-├── client.py              # Main Anthropic API client wrapper
-├── agent.py               # Agent SDK setup and MCP config (TODO)
+├── agent.py               # Main Agent SDK implementation (ACTIVE)
 ├── policy.py              # Decision rules and thresholds (TODO)
 ├── approval.py            # Approval UI (TODO)
 ├── audit.py               # JSONL audit logging (TODO)
-└── database.py            # Database schema and queries (TODO)
+├── database.py            # Database schema and queries (TODO)
+└── client.py              # Legacy: Basic API client (reference only)
 
 examples/
-├── basic_client.py        # Basic client usage examples
+├── agent_sdk_demo.py      # Agent SDK usage examples (RECOMMENDED)
+├── basic_client.py        # Legacy: Basic API examples (reference)
 ```
 
-## Available APIs
+## Claude Agent SDK vs Messages API
 
-### Core Messages API
-The basic interface for all Claude interactions:
+### Why Agent SDK?
+
+The **Claude Agent SDK** is purpose-built for autonomous agents and provides:
+
+✅ **Built-in Tools**: File read/write, bash execution, grep, web search (out of the box)
+✅ **Full Agent Loop**: Claude automatically decides when to use tools and executes them
+✅ **Context Management**: Handles conversation history, memory, and session state
+✅ **MCP Integration**: Ready to connect to MCP servers (Azure Advisor, Jira)
+✅ **Audit Trail**: Structured logging and decision tracking
+✅ **Sessions**: Persistent agent state across runs
+✅ **Approval Gates**: Built-in hooks for human-in-the-loop workflows
+
+### Agent SDK Usage
 
 ```python
-from advisor_agent.client import AdvisorAgentClient
+from advisor_agent.agent import AdvisorAgent
 
-client = AdvisorAgentClient()
-response = client.send_message("Your question here")
-```
+# Initialize agent
+agent = AdvisorAgent(model="claude-opus-5-5")
 
-### Tool Use (for MCP Server Integration)
-Define tools that Claude can call (simulating MCP servers):
+# Query the agent (it handles everything: tools, loops, decisions)
+response = agent.query("Process Azure Advisor findings for this subscription")
 
-```python
-tools = [
-    {
-        "name": "get_advisor_findings",
-        "description": "Fetch Azure Advisor recommendations",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "subscription_id": {"type": "string"},
-                "category": {"type": "string"}
-            },
-            "required": ["subscription_id"]
-        }
-    }
-]
-
-text_response, tool_calls = client.send_message_with_tools(
-    user_message="Get cost optimization findings",
-    tools=tools
+# Dry-run analysis (no actual changes)
+result = agent.process_findings_dry_run(
+    subscription_id="12345678-1234-1234-1234-123456789012",
+    jira_project="AZURE",
+    dry_run=True
 )
-```
 
-### Multi-turn Conversations
-The client maintains conversation history automatically:
-
-```python
-client.send_message("First question")
-client.send_message("Follow-up question")  # Has context from first
-client.clear_history()  # Clear when starting new conversation
+# Decision logging (automatic audit trail)
+agent.save_decision_log({
+    "timestamp": "2024-01-15T10:30:00Z",
+    "advisor_id": "rec-123",
+    "decision": "CREATE",
+    "jira_key": "AZURE-456"
+})
 ```
 
 ## Available Claude Models
