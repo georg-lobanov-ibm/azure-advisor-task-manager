@@ -47,22 +47,19 @@ source .env
 src/advisor_agent/
 ├── __init__.py
 ├── agent.py               # Main Agent SDK implementation (ACTIVE)
-├── policy.py              # Decision rules and thresholds (TODO)
-├── approval.py            # Approval UI (TODO)
-├── audit.py               # JSONL audit logging (TODO)
-├── database.py            # Database schema and queries (TODO)
-└── client.py              # Legacy: Basic API client (reference only)
+├── policy.py               # Decision rules and thresholds
+├── approval.py             # Approval UI
+├── database.py             # Database schema and queries
+└── audit.py                # JSONL audit logging (TODO)
 
 examples/
-├── agent_sdk_demo.py      # Agent SDK usage examples (RECOMMENDED)
-├── basic_client.py        # Legacy: Basic API examples (reference)
+├── agent_sdk_demo.py       # Agent SDK usage examples
 ```
 
-## Claude Agent SDK vs Messages API
+## Claude Agent SDK
 
-### Why Agent SDK?
-
-The **Claude Agent SDK** is purpose-built for autonomous agents and provides:
+This project is built exclusively on the **Claude Agent SDK**, which is
+purpose-built for autonomous agents and provides:
 
 ✅ **Built-in Tools**: File read/write, bash execution, grep, web search (out of the box)
 ✅ **Full Agent Loop**: Claude automatically decides when to use tools and executes them
@@ -111,21 +108,22 @@ Default is Claude Opus 5.5.
 ## Running Examples
 
 ```bash
-python examples/basic_client.py
+python examples/agent_sdk_demo.py
 ```
 
-This runs three examples:
-1. Basic single and multi-turn chat
-2. System prompt guidance
-3. Tool definitions (MCP server simulation)
+This runs through:
+1. Basic agent interaction
+2. Dry-run analysis of Azure Advisor findings
+3. Available built-in tools
+4. Decision logging and audit trail
+5. The agent's system prompt
 
 ## Key Features Implemented
 
-✅ Basic message sending
-✅ Multi-turn conversation support
-✅ Tool definitions (for MCP servers)
-✅ System prompt guidance
-✅ Model information retrieval
+✅ Claude Agent SDK integration (`agent.py`)
+✅ Decision policy engine with impact thresholds (`policy.py`)
+✅ SQLite persistence and audit trail (`database.py`)
+✅ Human-in-the-loop approval workflow (`approval.py`)
 
 ## Next Steps
 
@@ -135,9 +133,9 @@ This runs three examples:
 - [ ] Verify tool names and capabilities
 
 ### Phase 1 - MVP
-- [ ] Implement policy.py (decision rules)
-- [ ] Build approval UI
-- [ ] Set up SQLite database
+- [x] Implement policy.py (decision rules)
+- [x] Build approval UI
+- [x] Set up SQLite database
 - [ ] Create JSONL audit logging
 
 ### Phase 2 - Approval-gated Jira
@@ -156,7 +154,6 @@ This runs three examples:
 ## References
 
 - [Anthropic API Documentation](https://docs.anthropic.com)
+- [Claude Agent SDK](https://docs.anthropic.com/claude/docs/claude-agent-sdk)
 - [Claude Models Overview](https://docs.anthropic.com/claude/reference/models-overview)
-- [Tool Use Guide](https://docs.anthropic.com/claude/docs/tool-use)
-- [Prompt Caching](https://docs.anthropic.com/claude/docs/caching)
-- [Vision / Files API](https://docs.anthropic.com/claude/reference/files-api)
+- [MCP (Model Context Protocol)](https://docs.anthropic.com/claude/docs/mcp)
