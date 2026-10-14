@@ -4,6 +4,7 @@
 
 - Python 3.10+
 - pip or poetry
+- Node.js / `npx` on PATH (used to spawn the Azure MCP Server subprocess)
 
 ## Installation
 
@@ -46,7 +47,8 @@ source .env
 ```
 src/advisor_agent/
 ├── __init__.py
-├── agent.py               # Main Agent SDK implementation (ACTIVE)
+├── agent.py               # Main Agent SDK implementation + Azure Advisor MCP wiring (ACTIVE)
+├── main.py                # CLI entrypoint (Phase 0 spike)
 ├── policy.py               # Decision rules and thresholds
 ├── approval.py             # Approval UI
 ├── database.py             # Database schema and queries
@@ -54,6 +56,17 @@ src/advisor_agent/
 
 examples/
 ├── agent_sdk_demo.py       # Agent SDK usage examples
+```
+
+### Running the Phase 0 spike
+
+Requires `npx` (Node.js) on PATH to spawn the Azure MCP Server, and an Azure
+identity with Reader access on the target subscription(s) resolved via the
+standard Azure credential chain (e.g. `az login`, or a managed identity /
+service principal in the environment):
+
+```bash
+python -m advisor_agent.main --prompt "List Azure Advisor recommendations"
 ```
 
 ## Claude Agent SDK
@@ -121,6 +134,7 @@ This runs through:
 ## Key Features Implemented
 
 ✅ Claude Agent SDK integration (`agent.py`)
+✅ Azure Advisor MCP server connection, spawned as a local stdio subprocess (`agent.py`)
 ✅ Decision policy engine with impact thresholds (`policy.py`)
 ✅ SQLite persistence and audit trail (`database.py`)
 ✅ Human-in-the-loop approval workflow (`approval.py`)
@@ -128,7 +142,7 @@ This runs through:
 ## Next Steps
 
 ### Phase 0 - Spike (Current)
-- [ ] Connect to real Azure MCP server
+- [x] Connect to real Azure MCP server
 - [ ] Connect to real Jira MCP server
 - [ ] Verify tool names and capabilities
 
