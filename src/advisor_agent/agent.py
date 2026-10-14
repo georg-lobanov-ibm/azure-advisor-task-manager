@@ -12,14 +12,86 @@ The agent has access to:
 - Custom tools: MCP server connections for Azure and Jira
 - Full agent loop with context management
 - Sessions for persistent state
+
+MCP integration
+----------------
+Per the implementation plan (``azure-advisor-task-manager-plan/PLAN.md``,
+section 3 "MCP integration"), the agent connects to the Azure MCP Server
+directly as an MCP client via the Claude Agent SDK's ``mcp_servers`` option —
+it does not shell out to the ``azmcp`` CLI per call. The SDK spawns the
+server as a local stdio subprocess and speaks MCP to it directly.
+
+Only the Azure Advisor side is wired up so far. The Jira/Atlassian MCP
+server's launch command is still TBD (see PLAN.md section 11, "Risks and
+open questions") and is intentionally left out until that is resolved.
 """
 
-import os
+import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import Agent, Prompt
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
+# Name this server is registered under in `mcp_servers`. MCP tools exposed by
+# it are addressed as `mcp__{AZURE_ADVISOR_SERVER_NAME}__<tool_name>`.
+AZURE_ADVISOR_SERVER_NAME = "azure_advisor"
+
+# The namespace exposes only read-only tools (metadata get/list, recommendation
+# list/summary/apply) — see docs/azure-advisor-mcp-server.md in the plan repo.
+# `--read-only` is redundant for this namespace today but kept as
+# defense-in-depth per PLAN.md section 3.
+AZURE_ADVISOR_NAMESPACE = "advisor"
+
+
+def azure_advisor_mcp_server_config() -> dict:
+    """Build the stdio MCP server config that starts the Azure MCP Server.
+
+    This spawns ``npx -y @azure/mcp@latest server start --namespace advisor
+    --read-only`` as a local subprocess, matching Microsoft's own sample and
+    PLAN.md section 3. Azure auth is resolved via the standard Azure
+    credential chain (managed identity or service principal) in the
+    environment this subprocess inherits — no explicit ``env`` override is
+    needed as long as the host/container's `AZURE_*` credentials are set.
+    """
+    return {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+            "-y",
+            "@azure/mcp@latest",
+            "server",
+            "start",
+            "--namespace",
+            AZURE_ADVISOR_NAMESPACE,
+            "--read-only",
+        ],
+    }
+
+
+def build_azure_advisor_only_options(**overrides: Any) -> ClaudeAgentOptions:
+    """``ClaudeAgentOptions`` with only the Azure Advisor MCP server attached.
+
+    This is the Phase 0 spike from PLAN.md section 9: start the MCP server and
+    confirm the agent can connect to it and call its tools. The Jira MCP
+    server is deliberately not included yet.
+
+    Any keyword in ``overrides`` is merged in last, so callers can extend or
+    replace defaults (e.g. pass a different ``permission_mode``, ``model`` or
+    ``system_prompt``, or add more ``mcp_servers`` once the Jira server is
+    ready) without duplicating this wiring.
+    """
+    options_kwargs: dict[str, Any] = {
+        "mcp_servers": {AZURE_ADVISOR_SERVER_NAME: azure_advisor_mcp_server_config()},
+        # Wildcards only match after a literal `mcp__<server>__` prefix (a
+        # bare `mcp__*` or `*` is ignored), so this scopes approval to every
+        # tool this specific server exposes — all read-only, see PLAN.md
+        # section 3 and docs/azure-advisor-mcp-server.md.
+        "allowed_tools": [f"mcp__{AZURE_ADVISOR_SERVER_NAME}__*"],
+    }
+    options_kwargs.update(overrides)
+    return ClaudeAgentOptions(**options_kwargs)
 
 
 class AdvisorAgent:
@@ -27,7 +99,6 @@ class AdvisorAgent:
 
     def __init__(
         self,
-        api_key: str | None = None,
         model: str = "claude-opus-5-5",
         workspace_dir: str | None = None,
     ):
@@ -35,25 +106,26 @@ class AdvisorAgent:
         Initialize the Advisor Agent.
 
         Args:
-            api_key: Anthropic API key. If not provided, uses ANTHROPIC_API_KEY env var.
             model: Claude model to use. Defaults to Claude Opus 5.5.
             workspace_dir: Directory for agent workspace. Defaults to ./workspace.
+
+        The SDK authenticates the same way the Claude Code CLI does (e.g. via
+        the ANTHROPIC_API_KEY environment variable); it is not passed as a
+        constructor argument here.
         """
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "ANTHROPIC_API_KEY environment variable not set and no API key provided"
-            )
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise ValueError("ANTHROPIC_API_KEY environment variable not set")
 
         self.model = model
         self.workspace_dir = Path(workspace_dir or "./workspace")
         self.workspace_dir.mkdir(exist_ok=True)
 
-        # Initialize the agent with system prompt
+        # Build the system prompt and the agent options. Only the Azure
+        # Advisor MCP server is attached so far (see module docstring).
         self.system_prompt = self._build_system_prompt()
-        self.agent = Agent(
+        self.options = build_azure_advisor_only_options(
             model=self.model,
-            api_key=self.api_key,
+            system_prompt=self.system_prompt,
         )
 
     def _build_system_prompt(self) -> str:
@@ -109,22 +181,41 @@ When working with Advisor findings:
             context: Optional context dict with Azure subscription ID, Jira project, etc.
 
         Returns:
-            The agent's response/analysis.
+            The agent's response/analysis (concatenated text blocks).
         """
         # Build context if provided
         context_str = ""
         if context:
             context_str = f"\n\nContext:\n{json.dumps(context, indent=2)}"
 
-        # Execute the agent query
         full_prompt = f"{prompt}{context_str}"
 
-        response = self.agent.query(
-            prompt=full_prompt,
-            system=self.system_prompt,
-        )
+        return asyncio.run(self._aquery(full_prompt))
 
-        return response
+    async def _aquery(self, prompt: str) -> str:
+        """
+        Run the prompt through the Agent SDK and collect the response text.
+
+        The SDK's `query()` is an async function yielding a stream of
+        `Message` objects (per PLAN.md section 3 / the Agent SDK docs). This
+        starts the Azure Advisor MCP server subprocess, runs the agent loop,
+        and extracts the plain text from every `AssistantMessage`.
+
+        Args:
+            prompt: The fully-built prompt (including any context) to send.
+
+        Returns:
+            The concatenated text content of the agent's response.
+        """
+        chunks: list[str] = []
+
+        async for message in query(prompt=prompt, options=self.options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        chunks.append(block.text)
+
+        return "".join(chunks)
 
     def process_findings_dry_run(
         self,
@@ -199,7 +290,8 @@ Return a structured JSON proposal with:
         """
         Get list of tools available to the agent.
 
-        Built-in tools:
+        Built-in tools (subject to normal permission handling, not
+        auto-approved by `allowed_tools`):
         - Read files: for accessing audit logs, databases
         - Write files: for storing decisions and audit trails
         - Edit files: for updating configurations
@@ -207,9 +299,10 @@ Return a structured JSON proposal with:
         - Grep: for searching logs
         - Web search: for external context
 
-        MCP server tools (to be configured):
-        - Azure Advisor tools (read-only)
-        - Jira tools (gated by approval)
+        MCP server tools:
+        - Azure Advisor tools (read-only, auto-approved via `allowed_tools`
+          — `mcp__azure_advisor__*`; see `build_azure_advisor_only_options`)
+        - Jira tools (not yet wired up — launch command still TBD)
 
         Returns:
             List of available tool names.
@@ -221,8 +314,8 @@ Return a structured JSON proposal with:
             "bash",
             "grep",
             "web_search",
+            f"mcp__{AZURE_ADVISOR_SERVER_NAME}__*",
             # MCP servers (future):
-            # "azure_advisor_*",
             # "jira_*",
         ]
 
