@@ -25,13 +25,12 @@ def demo_basic_agent_interaction():
     print("Example 1: Initialize and Query the Advisor Agent")
     print("=" * 70)
 
-    agent = AdvisorAgent()
-
     # Simple query
     prompt = """List the key features and benefits of the Azure Advisor Task Manager agent.
     What makes it different from a simple script?"""
 
-    response = agent.query(prompt)
+    with AdvisorAgent() as agent:
+        response = agent.query(prompt)
     print(f"\nAgent Response:\n{response}\n")
 
 
@@ -41,15 +40,14 @@ def demo_dry_run_analysis():
     print("Example 2: Dry-Run Analysis of Azure Advisor Findings")
     print("=" * 70)
 
-    agent = AdvisorAgent()
-
     # Simulate a dry-run analysis
     print("\nInitiating dry-run analysis...")
-    result = agent.process_findings_dry_run(
-        subscription_id="12345678-1234-1234-1234-123456789012",
-        jira_project="AZURE",
-        dry_run=True,
-    )
+    with AdvisorAgent() as agent:
+        result = agent.process_findings_dry_run(
+            subscription_id="12345678-1234-1234-1234-123456789012",
+            jira_project="AZURE",
+            dry_run=True,
+        )
 
     print(f"\nAnalysis Result:")
     print(json.dumps(result, indent=2))
@@ -61,9 +59,8 @@ def demo_available_tools():
     print("Example 3: Built-in Tools Available to the Agent")
     print("=" * 70)
 
-    agent = AdvisorAgent()
-
-    tools = agent.get_agent_tools()
+    with AdvisorAgent() as agent:
+        tools = agent.get_agent_tools()
 
     print("\nThe Advisor Agent has access to these built-in tools:\n")
     for tool in tools:
@@ -84,8 +81,6 @@ def demo_decision_logging():
     print("=" * 70)
     print("Example 4: Decision Logging and Audit Trail")
     print("=" * 70)
-
-    agent = AdvisorAgent()
 
     # Simulate some decisions
     decisions = [
@@ -118,13 +113,15 @@ def demo_decision_logging():
         },
     ]
 
-    print("\nSimulating decision logging...\n")
-    for decision in decisions:
-        agent.save_decision_log(decision)
-        print(f"Logged: {decision['decision']:6} | {decision['advisor_id']:15} | {decision['category']:12}")
+    with AdvisorAgent() as agent:
+        print("\nSimulating decision logging...\n")
+        for decision in decisions:
+            agent.save_decision_log(decision)
+            print(f"Logged: {decision['decision']:6} | {decision['advisor_id']:15} | {decision['category']:12}")
 
-    print("\nLoading audit log...")
-    log = agent.load_decision_log()
+        print("\nLoading audit log...")
+        log = agent.load_decision_log()
+
     print(f"Total decisions in log: {len(log)}\n")
 
     print("Full audit log:")
@@ -137,11 +134,12 @@ def demo_system_prompt():
     print("Example 5: Agent System Prompt")
     print("=" * 70)
 
-    agent = AdvisorAgent()
+    with AdvisorAgent() as agent:
+        system_prompt = agent.system_prompt
 
     print("\nThe agent operates under this system prompt:\n")
     print("-" * 70)
-    print(agent.system_prompt)
+    print(system_prompt)
     print("-" * 70)
 
 

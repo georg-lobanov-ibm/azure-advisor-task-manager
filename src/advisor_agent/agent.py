@@ -24,15 +24,34 @@ server as a local stdio subprocess and speaks MCP to it directly.
 Only the Azure Advisor side is wired up so far. The Jira/Atlassian MCP
 server's launch command is still TBD (see PLAN.md section 11, "Risks and
 open questions") and is intentionally left out until that is resolved.
+
+Session model
+-------------
+``AdvisorAgent`` uses ``ClaudeSDKClient`` rather than the SDK's one-shot
+``query()`` function, and keeps the client connected for the lifetime of the
+``AdvisorAgent`` instance. The one-shot function connects, runs a single
+exchange, and disconnects internally on every call, which would respawn the
+Azure MCP server subprocess on every ``agent.query(...)`` call even against
+the same instance. Here, the connection (and its MCP subprocess) is
+established lazily on first use and reused across every subsequent
+``.query()`` call on that instance. Because ``query()`` is a sync method
+backed by ``asyncio.run()`` historically, and asyncio resources can't cross
+separate ``asyncio.run()`` calls, the persistent client is driven by a
+dedicated background event loop thread that outlives any single call.
+
+Call ``AdvisorAgent.close()`` (or use the instance as a context manager,
+``with AdvisorAgent(...) as agent:``) when done, to disconnect the client and
+stop the background thread.
 """
 
 import asyncio
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, TextBlock
 
 # Name this server is registered under in `mcp_servers`. MCP tools exposed by
 # it are addressed as `mcp__{AZURE_ADVISOR_SERVER_NAME}__<tool_name>`.
@@ -128,6 +147,24 @@ class AdvisorAgent:
             system_prompt=self.system_prompt,
         )
 
+        # Persistent ClaudeSDKClient session (see module docstring "Session
+        # model"). The client is created and connected lazily on first
+        # query(); the background loop/thread live for this instance's
+        # lifetime so the connection survives across separate sync query()
+        # calls. Call close() (or use `with AdvisorAgent(...) as agent:`) to
+        # release both.
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, name="advisor-agent-loop", daemon=True
+        )
+        self._loop_thread.start()
+        self._client: ClaudeSDKClient | None = None
+        self._connected = False
+        self._closed = False
+        # Serializes query()/receive_response() pairs on the shared
+        # connection if query() is ever called from multiple threads.
+        self._query_lock = threading.Lock()
+
     def _build_system_prompt(self) -> str:
         """Build the system prompt for the agent."""
         return """You are the Azure Advisor Task Manager Agent. Your mission is to:
@@ -176,6 +213,10 @@ When working with Advisor findings:
         """
         Query the agent to process Azure Advisor findings and Jira sync.
 
+        Uses the persistent `ClaudeSDKClient` connection (see module
+        docstring "Session model"), connecting it on first use and reusing
+        it on every subsequent call to this method on this instance.
+
         Args:
             prompt: The user's request to the agent.
             context: Optional context dict with Azure subscription ID, Jira project, etc.
@@ -190,16 +231,30 @@ When working with Advisor findings:
 
         full_prompt = f"{prompt}{context_str}"
 
-        return asyncio.run(self._aquery(full_prompt))
+        with self._query_lock:
+            self._ensure_connected()
+            return self._run_coroutine(self._aquery(full_prompt))
+
+    def _run_coroutine(self, coro: Any) -> Any:
+        """Run a coroutine on this instance's background event loop and block for the result."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    def _ensure_connected(self) -> None:
+        """Create and connect the `ClaudeSDKClient` on first use, if not already connected."""
+        if not self._connected:
+            self._client = ClaudeSDKClient(options=self.options)
+            self._run_coroutine(self._client.connect())
+            self._connected = True
 
     async def _aquery(self, prompt: str) -> str:
         """
-        Run the prompt through the Agent SDK and collect the response text.
+        Send one prompt through the persistent client and collect the response text.
 
-        The SDK's `query()` is an async function yielding a stream of
-        `Message` objects (per PLAN.md section 3 / the Agent SDK docs). This
-        starts the Azure Advisor MCP server subprocess, runs the agent loop,
-        and extracts the plain text from every `AssistantMessage`.
+        Sends `prompt` via `ClaudeSDKClient.query()` and drains
+        `receive_response()` (which stops once it yields the `ResultMessage`
+        for this exchange), extracting the plain text from every
+        `AssistantMessage`. Must be called with `self._client` already
+        connected (see `_ensure_connected`).
 
         Args:
             prompt: The fully-built prompt (including any context) to send.
@@ -207,15 +262,44 @@ When working with Advisor findings:
         Returns:
             The concatenated text content of the agent's response.
         """
-        chunks: list[str] = []
+        assert self._client is not None  # _ensure_connected() runs first
 
-        async for message in query(prompt=prompt, options=self.options):
+        await self._client.query(prompt)
+
+        chunks: list[str] = []
+        async for message in self._client.receive_response():
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         chunks.append(block.text)
 
         return "".join(chunks)
+
+    def close(self) -> None:
+        """
+        Disconnect the MCP client and stop the background event loop.
+
+        Idempotent — safe to call more than once (e.g. from both an explicit
+        `close()` and `__exit__`). Call this (or use `AdvisorAgent` as a
+        context manager) when done with the agent to release the connection,
+        its MCP subprocess, and the background thread.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        if self._connected:
+            self._run_coroutine(self._client.disconnect())
+            self._connected = False
+
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop_thread.join(timeout=5)
+
+    def __enter__(self) -> "AdvisorAgent":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
 
     def process_findings_dry_run(
         self,

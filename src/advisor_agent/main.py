@@ -41,8 +41,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    agent = AdvisorAgent(model=args.model)
-    response = agent.query(args.prompt)
+    with AdvisorAgent(model=args.model) as agent:
+        response = agent.query(args.prompt)
     print(response)
 
 

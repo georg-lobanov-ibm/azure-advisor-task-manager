@@ -79,34 +79,38 @@ purpose-built for autonomous agents and provides:
 ✅ **Context Management**: Handles conversation history, memory, and session state
 ✅ **MCP Integration**: Ready to connect to MCP servers (Azure Advisor, Jira)
 ✅ **Audit Trail**: Structured logging and decision tracking
-✅ **Sessions**: Persistent agent state across runs
+✅ **Sessions**: Persistent agent state — `AdvisorAgent` keeps one `ClaudeSDKClient` connected for its lifetime and reuses it across calls, instead of reconnecting per query
 ✅ **Approval Gates**: Built-in hooks for human-in-the-loop workflows
 
 ### Agent SDK Usage
 
+The agent keeps a persistent `ClaudeSDKClient` connection (and its Azure MCP
+subprocess) open for its lifetime, reusing it across every `.query()` call
+on the same instance instead of reconnecting each time. Use it as a context
+manager so the connection is cleanly closed when you're done (or call
+`agent.close()` yourself):
+
 ```python
 from advisor_agent.agent import AdvisorAgent
 
-# Initialize agent
-agent = AdvisorAgent(model="claude-opus-5-5")
+with AdvisorAgent(model="claude-opus-5-5") as agent:
+    # Query the agent (it handles everything: tools, loops, decisions)
+    response = agent.query("Process Azure Advisor findings for this subscription")
 
-# Query the agent (it handles everything: tools, loops, decisions)
-response = agent.query("Process Azure Advisor findings for this subscription")
+    # Dry-run analysis (no actual changes) — reuses the same connection
+    result = agent.process_findings_dry_run(
+        subscription_id="12345678-1234-1234-1234-123456789012",
+        jira_project="AZURE",
+        dry_run=True
+    )
 
-# Dry-run analysis (no actual changes)
-result = agent.process_findings_dry_run(
-    subscription_id="12345678-1234-1234-1234-123456789012",
-    jira_project="AZURE",
-    dry_run=True
-)
-
-# Decision logging (automatic audit trail)
-agent.save_decision_log({
-    "timestamp": "2024-01-15T10:30:00Z",
-    "advisor_id": "rec-123",
-    "decision": "CREATE",
-    "jira_key": "AZURE-456"
-})
+    # Decision logging (automatic audit trail)
+    agent.save_decision_log({
+        "timestamp": "2024-01-15T10:30:00Z",
+        "advisor_id": "rec-123",
+        "decision": "CREATE",
+        "jira_key": "AZURE-456"
+    })
 ```
 
 ## Available Claude Models
