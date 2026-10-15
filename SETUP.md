@@ -65,7 +65,8 @@ Azure Advisor MCP server attached — Jira is optional, not required.
 ```
 src/advisor_agent/
 ├── __init__.py
-├── agent.py               # Main Agent SDK implementation + Azure Advisor MCP wiring (ACTIVE)
+├── agent.py               # Main Agent SDK implementation; composes both MCP servers (ACTIVE)
+├── azure_mcp.py            # Azure Advisor MCP server wiring (ACTIVE)
 ├── jira_mcp.py             # Jira/Atlassian MCP server wiring + write-tool approval hook (ACTIVE)
 ├── main.py                # CLI entrypoint (Phase 0 spike)
 ├── policy.py               # Decision rules and thresholds
@@ -96,7 +97,7 @@ purpose-built for autonomous agents and provides:
 ✅ **Built-in Tools**: File read/write, bash execution, grep, web search (out of the box)
 ✅ **Full Agent Loop**: Claude automatically decides when to use tools and executes them
 ✅ **Context Management**: Handles conversation history, memory, and session state
-✅ **MCP Integration**: Connects to the Azure Advisor MCP server (`agent.py`) and, if configured, the Jira MCP server (`jira_mcp.py`)
+✅ **MCP Integration**: Connects to the Azure Advisor MCP server (`azure_mcp.py`) and, if configured, the Jira MCP server (`jira_mcp.py`); `agent.py` composes both
 ✅ **Audit Trail**: Structured logging and decision tracking
 ✅ **Sessions**: Persistent agent state — `AdvisorAgent` keeps one `ClaudeSDKClient` connected for its lifetime and reuses it across calls, instead of reconnecting per query
 ✅ **Approval Gates**: Jira write tools (`mcp__jira__*`) are blocked until a human approves them, via a `PreToolUse` hook (`jira_mcp.py`) — not just an `allowed_tools` omission, since hooks run before `allowed_tools` is evaluated
@@ -157,7 +158,7 @@ This runs through:
 ## Key Features Implemented
 
 ✅ Claude Agent SDK integration (`agent.py`)
-✅ Azure Advisor MCP server connection, spawned as a local stdio subprocess (`agent.py`)
+✅ Azure Advisor MCP server connection, spawned as a local stdio subprocess (`azure_mcp.py`)
 ✅ Jira MCP server connection, spawned as a local stdio subprocess if configured, with write tools gated behind approval (`jira_mcp.py`)
 ✅ Decision policy engine with impact thresholds (`policy.py`)
 ✅ SQLite persistence and audit trail (`database.py`)
