@@ -16,14 +16,18 @@ The agent has access to:
 MCP integration
 ----------------
 Per the implementation plan (``azure-advisor-task-manager-plan/PLAN.md``,
-section 3 "MCP integration"), the agent connects to the Azure MCP Server
+section 3 "MCP integration"), the agent connects to both MCP servers
 directly as an MCP client via the Claude Agent SDK's ``mcp_servers`` option —
-it does not shell out to the ``azmcp`` CLI per call. The SDK spawns the
-server as a local stdio subprocess and speaks MCP to it directly.
+it does not shell out to a CLI per call. The SDK spawns each server as a
+local stdio subprocess and speaks MCP to it directly.
 
-Only the Azure Advisor side is wired up so far. The Jira/Atlassian MCP
-server's launch command is still TBD (see PLAN.md section 11, "Risks and
-open questions") and is intentionally left out until that is resolved.
+The Azure Advisor wiring (``azure_advisor_mcp_server_config``, below) and the
+Jira wiring (``jira_mcp.py``) are deliberately kept in separate modules, each
+owning its own server config and approval logic; ``build_agent_options``
+below composes both into one ``ClaudeAgentOptions``. Jira credentials are
+optional: if they aren't configured, the agent runs with only the Azure
+Advisor MCP server attached and prints a warning (see ``jira_mcp.py`` and
+``build_agent_options``).
 
 Session model
 -------------
@@ -47,11 +51,19 @@ stop the background thread.
 import asyncio
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, TextBlock
+
+from .jira_mcp import (
+    JIRA_SERVER_NAME,
+    jira_allowed_tools,
+    jira_approval_hook_matcher,
+    jira_mcp_server_config,
+)
 
 # Name this server is registered under in `mcp_servers`. MCP tools exposed by
 # it are addressed as `mcp__{AZURE_ADVISOR_SERVER_NAME}__<tool_name>`.
@@ -89,26 +101,52 @@ def azure_advisor_mcp_server_config() -> dict:
     }
 
 
-def build_azure_advisor_only_options(**overrides: Any) -> ClaudeAgentOptions:
-    """``ClaudeAgentOptions`` with only the Azure Advisor MCP server attached.
+def build_agent_options(**overrides: Any) -> ClaudeAgentOptions:
+    """``ClaudeAgentOptions`` with the Azure Advisor and Jira MCP servers attached.
 
-    This is the Phase 0 spike from PLAN.md section 9: start the MCP server and
-    confirm the agent can connect to it and call its tools. The Jira MCP
-    server is deliberately not included yet.
+    Azure Advisor tools are all read-only and wildcard-allowed outright (see
+    PLAN.md section 3 and docs/azure-advisor-mcp-server.md). Jira tools are
+    wildcard-allowed too, but Jira *write* tools are additionally gated
+    behind human approval by a ``PreToolUse`` hook from ``jira_mcp.py`` —
+    hooks run before ``allowed_tools`` is evaluated, so that gate holds even
+    though the wildcard below also matches write tool names.
+
+    Jira credentials are optional: if ``jira_mcp_server_config()`` can't find
+    them in the environment, this prints a warning to stderr and returns
+    options with only the Azure Advisor server attached, same as before Jira
+    was wired up.
 
     Any keyword in ``overrides`` is merged in last, so callers can extend or
     replace defaults (e.g. pass a different ``permission_mode``, ``model`` or
-    ``system_prompt``, or add more ``mcp_servers`` once the Jira server is
-    ready) without duplicating this wiring.
+    ``system_prompt``) without duplicating this wiring.
     """
+    mcp_servers: dict[str, Any] = {AZURE_ADVISOR_SERVER_NAME: azure_advisor_mcp_server_config()}
+    # Wildcards only match after a literal `mcp__<server>__` prefix (a bare
+    # `mcp__*` or `*` is ignored), so this scopes approval to every tool this
+    # specific server exposes — all read-only, see PLAN.md section 3 and
+    # docs/azure-advisor-mcp-server.md.
+    allowed_tools: list[str] = [f"mcp__{AZURE_ADVISOR_SERVER_NAME}__*"]
+    hooks: dict[str, list[Any]] = {}
+
+    jira_config = jira_mcp_server_config()
+    if jira_config is not None:
+        mcp_servers[JIRA_SERVER_NAME] = jira_config
+        allowed_tools.extend(jira_allowed_tools())
+        hooks["PreToolUse"] = [jira_approval_hook_matcher()]
+    else:
+        print(
+            "Warning: Jira MCP server not configured (set JIRA_URL plus "
+            "JIRA_USERNAME+JIRA_API_TOKEN or JIRA_PERSONAL_TOKEN) - running "
+            "with the Azure Advisor MCP server only.",
+            file=sys.stderr,
+        )
+
     options_kwargs: dict[str, Any] = {
-        "mcp_servers": {AZURE_ADVISOR_SERVER_NAME: azure_advisor_mcp_server_config()},
-        # Wildcards only match after a literal `mcp__<server>__` prefix (a
-        # bare `mcp__*` or `*` is ignored), so this scopes approval to every
-        # tool this specific server exposes — all read-only, see PLAN.md
-        # section 3 and docs/azure-advisor-mcp-server.md.
-        "allowed_tools": [f"mcp__{AZURE_ADVISOR_SERVER_NAME}__*"],
+        "mcp_servers": mcp_servers,
+        "allowed_tools": allowed_tools,
     }
+    if hooks:
+        options_kwargs["hooks"] = hooks
     options_kwargs.update(overrides)
     return ClaudeAgentOptions(**options_kwargs)
 
@@ -139,10 +177,10 @@ class AdvisorAgent:
         self.workspace_dir = Path(workspace_dir or "./workspace")
         self.workspace_dir.mkdir(exist_ok=True)
 
-        # Build the system prompt and the agent options. Only the Azure
-        # Advisor MCP server is attached so far (see module docstring).
+        # Build the system prompt and the agent options (both MCP servers;
+        # see module docstring and build_agent_options).
         self.system_prompt = self._build_system_prompt()
-        self.options = build_azure_advisor_only_options(
+        self.options = build_agent_options(
             model=self.model,
             system_prompt=self.system_prompt,
         )
@@ -385,8 +423,10 @@ Return a structured JSON proposal with:
 
         MCP server tools:
         - Azure Advisor tools (read-only, auto-approved via `allowed_tools`
-          — `mcp__azure_advisor__*`; see `build_azure_advisor_only_options`)
-        - Jira tools (not yet wired up — launch command still TBD)
+          — `mcp__azure_advisor__*`; see `build_agent_options`)
+        - Jira tools (`mcp__jira__*`; read tools auto-approved, write tools
+          gated behind human approval by a `PreToolUse` hook — see
+          `jira_mcp.py`. Only attached if Jira credentials are configured.)
 
         Returns:
             List of available tool names.
@@ -399,8 +439,7 @@ Return a structured JSON proposal with:
             "grep",
             "web_search",
             f"mcp__{AZURE_ADVISOR_SERVER_NAME}__*",
-            # MCP servers (future):
-            # "jira_*",
+            f"mcp__{JIRA_SERVER_NAME}__*",
         ]
 
     def save_decision_log(self, decision: dict) -> None:
