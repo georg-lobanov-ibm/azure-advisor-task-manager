@@ -5,6 +5,8 @@
 - Python 3.10+
 - pip or poetry
 - Node.js / `npx` on PATH (used to spawn the Azure MCP Server subprocess)
+- `uv` / `uvx` on PATH (used to spawn the Jira MCP server subprocess, if Jira
+  is configured — see "Jira credentials" below)
 
 ## Installation
 
@@ -42,12 +44,30 @@ Then load it:
 source .env
 ```
 
+### 4. Set Up Jira Credentials (optional)
+
+The Jira MCP server (`sooperset/mcp-atlassian`, spawned via `uvx mcp-atlassian`)
+is attached automatically if its credentials are present in the environment.
+Set `JIRA_URL` plus either `JIRA_USERNAME` + `JIRA_API_TOKEN` (Jira Cloud) or
+`JIRA_PERSONAL_TOKEN` (Jira Server/Data Center):
+
+```bash
+export JIRA_URL='https://your-site.atlassian.net'
+export JIRA_USERNAME='you@example.com'
+export JIRA_API_TOKEN='...'
+```
+
+If these aren't set, `AdvisorAgent` prints a warning and runs with only the
+Azure Advisor MCP server attached — Jira is optional, not required.
+
 ## Project Structure
 
 ```
 src/advisor_agent/
 ├── __init__.py
-├── agent.py               # Main Agent SDK implementation + Azure Advisor MCP wiring (ACTIVE)
+├── agent.py               # Main Agent SDK implementation; composes both MCP servers (ACTIVE)
+├── azure_mcp.py            # Azure Advisor MCP server wiring (ACTIVE)
+├── jira_mcp.py             # Jira/Atlassian MCP server wiring + write-tool approval hook (ACTIVE)
 ├── main.py                # CLI entrypoint (Phase 0 spike)
 ├── policy.py               # Decision rules and thresholds
 ├── approval.py             # Approval UI
@@ -77,10 +97,10 @@ purpose-built for autonomous agents and provides:
 ✅ **Built-in Tools**: File read/write, bash execution, grep, web search (out of the box)
 ✅ **Full Agent Loop**: Claude automatically decides when to use tools and executes them
 ✅ **Context Management**: Handles conversation history, memory, and session state
-✅ **MCP Integration**: Ready to connect to MCP servers (Azure Advisor, Jira)
+✅ **MCP Integration**: Connects to the Azure Advisor MCP server (`azure_mcp.py`) and, if configured, the Jira MCP server (`jira_mcp.py`); `agent.py` composes both
 ✅ **Audit Trail**: Structured logging and decision tracking
 ✅ **Sessions**: Persistent agent state — `AdvisorAgent` keeps one `ClaudeSDKClient` connected for its lifetime and reuses it across calls, instead of reconnecting per query
-✅ **Approval Gates**: Built-in hooks for human-in-the-loop workflows
+✅ **Approval Gates**: Jira write tools (`mcp__jira__*`) are blocked until a human approves them, via a `PreToolUse` hook (`jira_mcp.py`) — not just an `allowed_tools` omission, since hooks run before `allowed_tools` is evaluated
 
 ### Agent SDK Usage
 
@@ -138,7 +158,8 @@ This runs through:
 ## Key Features Implemented
 
 ✅ Claude Agent SDK integration (`agent.py`)
-✅ Azure Advisor MCP server connection, spawned as a local stdio subprocess (`agent.py`)
+✅ Azure Advisor MCP server connection, spawned as a local stdio subprocess (`azure_mcp.py`)
+✅ Jira MCP server connection, spawned as a local stdio subprocess if configured, with write tools gated behind approval (`jira_mcp.py`)
 ✅ Decision policy engine with impact thresholds (`policy.py`)
 ✅ SQLite persistence and audit trail (`database.py`)
 ✅ Human-in-the-loop approval workflow (`approval.py`)
@@ -147,8 +168,8 @@ This runs through:
 
 ### Phase 0 - Spike (Current)
 - [x] Connect to real Azure MCP server
-- [ ] Connect to real Jira MCP server
-- [ ] Verify tool names and capabilities
+- [x] Connect to real Jira MCP server
+- [ ] Verify tool names and capabilities against a live Jira MCP server (currently based on docs/jira-mcp-server.md research only)
 
 ### Phase 1 - MVP
 - [x] Implement policy.py (decision rules)

@@ -72,8 +72,9 @@ def demo_available_tools():
     print("  • Execute bash commands for complex operations")
     print("  • Search file systems for historical data")
     print("  • Access external information via web search")
-    print("  • (Soon) Connect to Azure Advisor MCP server")
-    print("  • (Soon) Connect to Jira MCP server")
+    print("  • Connect to the Azure Advisor MCP server (read-only)")
+    print("  • Connect to the Jira MCP server, if configured (reads allowed,")
+    print("    writes gated behind human approval)")
 
 
 def demo_decision_logging():
