@@ -6,6 +6,8 @@
             "type": "debugpy",
             "request": "launch",
             "module": "advisor_agent.main",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "preLaunchTask": "Setup virtualenv and install dependencies",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
@@ -22,6 +24,8 @@
                 "--prompt",
                 "${input:prompt}"
             ],
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "preLaunchTask": "Setup virtualenv and install dependencies",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
@@ -34,6 +38,8 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/examples/agent_sdk_demo.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "preLaunchTask": "Setup virtualenv and install dependencies",
             "cwd": "${workspaceFolder}",
             "envFile": "${workspaceFolder}/.env",
             "console": "integratedTerminal"
