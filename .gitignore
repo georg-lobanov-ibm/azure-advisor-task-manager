@@ -3,3 +3,4 @@ claude_session_id.txt
 __pycache__/
 *.pyc
 .venv/
+.env

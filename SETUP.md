@@ -31,17 +31,23 @@ Get your API key from [console.anthropic.com](https://console.anthropic.com):
 export ANTHROPIC_API_KEY='sk-ant-...'
 ```
 
-Or create a `.env` file:
+Or create a `.env` file from the template (`.env` is git-ignored):
 
 ```bash
-# .env
-ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env
+# then edit .env and set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Then load it:
+The VS Code launch configurations load `.env` automatically (`envFile` in
+`.vscode/launch.json`). VS Code skips a missing `.env` without an error, so if
+the agent reports that `ANTHROPIC_API_KEY` is not set, check that the file
+exists in the repo root.
+
+To use it from a terminal, export everything in it (a plain `source .env`
+would not export the variables to child processes):
 
 ```bash
-source .env
+set -a; source .env; set +a
 ```
 
 ### 4. Set Up Jira Credentials (optional)
