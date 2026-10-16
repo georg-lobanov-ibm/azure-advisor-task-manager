@@ -1,0 +1,56 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Advisor Agent (default prompt)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "advisor_agent.main",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "preLaunchTask": "Setup virtualenv and install dependencies",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Advisor Agent (custom prompt)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "advisor_agent.main",
+            "args": [
+                "--prompt",
+                "${input:prompt}"
+            ],
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "preLaunchTask": "Setup virtualenv and install dependencies",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Example: agent_sdk_demo",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/agent_sdk_demo.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "preLaunchTask": "Setup virtualenv and install dependencies",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "prompt",
+            "type": "promptString",
+            "description": "Prompt to send to the agent",
+            "default": "List the Azure Advisor recommendations you can see using the available tools, grouped by category and impact."
+        }
+    ]
+}
