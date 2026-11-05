@@ -4,9 +4,10 @@
 
 - Python 3.10+
 - pip or poetry
-- Node.js / `npx` on PATH (used to spawn the Azure MCP Server subprocess)
-- `uv` / `uvx` on PATH (used to spawn the Jira MCP server subprocess, if Jira
-  is configured — see "Jira credentials" below)
+- `uv` / `uvx` on PATH. It spawns the Azure MCP Server subprocess (the
+  `msmcp-azure` package from PyPI, which bundles Microsoft's `azmcp` binary;
+  the first start downloads about 60 MB) and the Jira MCP server subprocess,
+  if Jira is configured — see "Jira credentials" below. Node.js is not needed.
 
 ## Installation
 
@@ -113,7 +114,7 @@ examples/
 
 ### Running the Phase 0 spike
 
-Requires `npx` (Node.js) on PATH to spawn the Azure MCP Server, and an Azure
+Requires `uvx` on PATH to spawn the Azure MCP Server, and an Azure
 identity with Reader access on the target subscription(s) resolved via the
 standard Azure credential chain (e.g. `az login`, or a managed identity /
 service principal in the environment):

@@ -9,7 +9,7 @@ This demonstrates:
 4. Decision logging and audit trail
 
 Examples 1 and 2 call the Claude API and start the MCP servers (the Azure one
-needs Node.js/npx and Azure credentials). Examples 3, 4 and 5 only inspect the
+needs uvx and Azure credentials). Examples 3, 4 and 5 only inspect the
 agent and make no API calls.
 """
 
