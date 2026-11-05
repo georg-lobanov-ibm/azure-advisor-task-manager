@@ -12,6 +12,9 @@ This demonstrates:
 import sys
 import os
 import json
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -145,10 +148,14 @@ def demo_system_prompt():
 
 
 if __name__ == "__main__":
+    # Load the repo-root .env (see .env.example). Variables already set in the
+    # environment take precedence over the file; a missing file is ignored.
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
     # Check for API key
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY environment variable not set")
-        print("Please set it before running this demo:")
+        print("Please set it in .env (cp .env.example .env) or export it:")
         print("  export ANTHROPIC_API_KEY='sk-ant-...'")
         sys.exit(1)
 

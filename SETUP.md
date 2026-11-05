@@ -38,13 +38,19 @@ cp .env.example .env
 # then edit .env and set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-The VS Code launch configurations load `.env` automatically (`envFile` in
-`.vscode/launch.json`). VS Code skips a missing `.env` without an error, so if
-the agent reports that `ANTHROPIC_API_KEY` is not set, check that the file
-exists in the repo root.
+The entry points (`python -m advisor_agent.main` and
+`examples/agent_sdk_demo.py`) load the repo-root `.env` themselves at startup
+with `python-dotenv`, so this works the same from VS Code, a terminal, or
+anywhere else. A missing `.env` is skipped without an error, and a variable
+already set in the environment (for example exported in your shell) takes
+precedence over the file. If the agent reports that `ANTHROPIC_API_KEY` is not
+set, check that `.env` exists in the repo root and that the line has the form
+`ANTHROPIC_API_KEY=sk-ant-...`.
 
-To use it from a terminal, export everything in it (a plain `source .env`
-would not export the variables to child processes):
+The `envFile` entries in `.vscode/launch.json` are not relied on for this.
+
+To export everything in it to your shell (a plain `source .env` would not
+export the variables to child processes):
 
 ```bash
 set -a; source .env; set +a

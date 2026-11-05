@@ -9,8 +9,16 @@ wiring is exercised against live Azure data.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from .agent import AdvisorAgent
+
+# The repo-root .env (see .env.example). Resolved from this file rather than
+# searched for upwards, so an unrelated .env in a parent directory is never
+# picked up.
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 DEFAULT_PROMPT = (
     "List the Azure Advisor recommendations you can see using the available "
@@ -40,6 +48,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # Load .env before AdvisorAgent reads ANTHROPIC_API_KEY / JIRA_* from the
+    # environment. A missing file is ignored, and variables already set in the
+    # environment (e.g. exported in the shell) take precedence over the file.
+    load_dotenv(ENV_FILE)
     args = parse_args(argv)
     with AdvisorAgent(model=args.model) as agent:
         response = agent.query(args.prompt)
