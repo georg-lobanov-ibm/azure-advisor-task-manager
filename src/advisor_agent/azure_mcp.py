@@ -2,9 +2,9 @@
 Azure Advisor MCP server wiring for the Azure Advisor Task Manager.
 
 Kept in its own module, mirroring the Jira/Atlassian MCP wiring in
-``jira_mcp.py``, so each MCP server's config and tool-allowlist logic can be
-read, tested, and changed independently. ``agent.py``'s ``build_agent_options``
-composes both into one ``ClaudeAgentOptions``.
+``jira_mcp.py``, so each MCP server's config and approval logic can be read,
+tested, and changed independently. ``agent.py``'s ``build_server_configs``
+composes both.
 
 Server choice
 --------------
@@ -17,19 +17,27 @@ for this namespace today but kept as defense-in-depth.
 
 Approval gating
 ----------------
-Unlike the Jira MCP server (see ``jira_mcp.py``), there is no write-tool
-approval gate here: every tool this server exposes is read-only, so a single
-wildcard in ``allowed_tools`` is sufficient and no ``PreToolUse`` hook is
-needed.
+Unlike the Jira MCP server (see ``jira_mcp.py``), there is no approval gate
+here: every tool this server exposes is read-only, so none of them needs a
+human in the loop.
 
-Azure auth is resolved via the standard Azure credential chain (managed
-identity or service principal) in the environment this subprocess inherits —
-no explicit ``env`` override is needed here, unlike the Jira server, as long
-as the host/container's ``AZURE_*`` credentials are set.
+Credentials
+-----------
+Azure auth is resolved by the server via the standard Azure credential chain
+(``az login``, a managed identity, or a service principal). The server is
+started with a minimal environment (see ``mcp_tools.py``), so the ``AZURE_*``
+variables that are set in this process — ``AZURE_TENANT_ID``,
+``AZURE_CLIENT_ID``, ``AZURE_CLIENT_SECRET``, ``AZURE_TOKEN_CREDENTIALS`` and
+so on — are forwarded explicitly. ``az login`` needs no forwarding: its token
+cache is found through ``HOME``, which is inherited.
 """
 
-# Name this server is registered under in `mcp_servers`. MCP tools exposed by
-# it are addressed as `mcp__{AZURE_ADVISOR_SERVER_NAME}__<tool_name>`.
+from mcp import StdioServerParameters
+
+from .mcp_tools import McpServerConfig, forward_env
+
+# Name this server is registered under. It identifies the server in approval
+# prompts and in `AdvisorAgent.get_agent_tools()`.
 AZURE_ADVISOR_SERVER_NAME = "azure_advisor"
 
 # The namespace exposes only read-only tools (metadata get/list, recommendation
@@ -39,38 +47,30 @@ AZURE_ADVISOR_SERVER_NAME = "azure_advisor"
 AZURE_ADVISOR_NAMESPACE = "advisor"
 
 
-def azure_advisor_mcp_server_config() -> dict:
-    """Build the stdio MCP server config that starts the Azure MCP Server.
+def azure_advisor_server_config() -> McpServerConfig:
+    """Build the config that starts the Azure MCP Server.
 
     This spawns ``npx -y @azure/mcp@latest server start --namespace advisor
     --read-only`` as a local subprocess, matching Microsoft's own sample and
-    PLAN.md section 3. Azure auth is resolved via the standard Azure
-    credential chain (managed identity or service principal) in the
-    environment this subprocess inherits — no explicit ``env`` override is
-    needed as long as the host/container's `AZURE_*` credentials are set.
+    PLAN.md section 3. Every set ``AZURE_*`` variable is forwarded to it (see
+    the module docstring, "Credentials").
     """
-    return {
-        "type": "stdio",
-        "command": "npx",
-        "args": [
-            "-y",
-            "@azure/mcp@latest",
-            "server",
-            "start",
-            "--namespace",
-            AZURE_ADVISOR_NAMESPACE,
-            "--read-only",
-        ],
-    }
-
-
-def azure_advisor_allowed_tools() -> list[str]:
-    """``allowed_tools`` entries for the Azure Advisor MCP server.
-
-    A single wildcard — every tool this server exposes is read-only (see the
-    module docstring), so no additional approval gate is needed here, unlike
-    ``jira_allowed_tools()`` in ``jira_mcp.py``. Wildcards only match after a
-    literal `mcp__<server>__` prefix (a bare `mcp__*` or `*` is ignored), so
-    this scopes the allow-list to exactly this server's tools.
-    """
-    return [f"mcp__{AZURE_ADVISOR_SERVER_NAME}__*"]
+    return McpServerConfig(
+        name=AZURE_ADVISOR_SERVER_NAME,
+        params=StdioServerParameters(
+            command="npx",
+            args=[
+                "-y",
+                "@azure/mcp@latest",
+                "server",
+                "start",
+                "--namespace",
+                AZURE_ADVISOR_NAMESPACE,
+                "--read-only",
+            ],
+            env=forward_env(prefixes=("AZURE_",)),
+        ),
+        # Every tool in this namespace is read-only.
+        requires_approval=lambda tool_name: False,
+        install_hint="Install Node.js (it provides npx) and make sure it is on PATH.",
+    )
