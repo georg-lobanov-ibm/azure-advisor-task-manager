@@ -44,8 +44,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import PaginatedRequestParams
 
-# How long one server gets to start and list its tools. The first
-# `npx -y @azure/mcp@latest` downloads the package, which can take a while.
+# How long one server gets to start and list its tools. The first `uvx` run of
+# a server downloads its package (about 60 MB for the Azure one), which can
+# take a while.
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 120.0
 
 # Tool names the Messages API accepts.
@@ -88,7 +89,7 @@ class McpServerConfig:
     # Called with the bare MCP tool name. Return True to put the tool behind
     # human approval.
     requires_approval: Callable[[str], bool]
-    # Shown when the command is not on PATH, e.g. "install Node.js (npx)".
+    # Shown when the command is not on PATH, e.g. "install uv (uvx)".
     install_hint: str = ""
 
 

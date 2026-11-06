@@ -9,11 +9,20 @@ composes both.
 Server choice
 --------------
 Per PLAN.md section 3 and docs/azure-advisor-mcp-server.md in the plan repo,
-this project uses Microsoft's own ``@azure/mcp`` server (a Node.js package,
-spawned via ``npx``), restricted to the ``advisor`` namespace and started
-with ``--read-only``. That namespace exposes only read-only tools (metadata
-get/list, recommendation list/summary/apply) — ``--read-only`` is redundant
-for this namespace today but kept as defense-in-depth.
+this project uses Microsoft's own Azure MCP server, restricted to the
+``advisor`` namespace and started with ``--read-only``.
+
+The server is installed from PyPI (``msmcp-azure``, a thin Python wrapper
+around Microsoft's native ``azmcp`` binary) and run with ``uvx``, so the only
+prerequisite is ``uv``, which the Jira server needs as well. Microsoft also
+publishes the server on npm as ``@azure/mcp``; that route needs Node.js and
+npm (``npx``).
+The version is pinned so a new release is never picked up unreviewed; bump
+``AZURE_MCP_VERSION`` deliberately and re-check the tool list.
+
+Microsoft's command reference marks ``advisor recommendation update`` as a
+write operation, so ``--read-only`` is expected to be what keeps it out of
+the tool list. Do not drop the flag.
 
 Approval gating
 ----------------
@@ -23,13 +32,23 @@ human in the loop.
 
 Credentials
 -----------
-Azure auth is resolved by the server via the standard Azure credential chain
-(``az login``, a managed identity, or a service principal). The server is
-started with a minimal environment (see ``mcp_tools.py``), so the ``AZURE_*``
-variables that are set in this process — ``AZURE_TENANT_ID``,
+The server is started with a minimal environment (see ``mcp_tools.py``), so the
+``AZURE_*`` variables that are set in this process — ``AZURE_TENANT_ID``,
 ``AZURE_CLIENT_ID``, ``AZURE_CLIENT_SECRET``, ``AZURE_TOKEN_CREDENTIALS`` and
 so on — are forwarded explicitly. ``az login`` needs no forwarding: its token
 cache is found through ``HOME``, which is inherited.
+
+``AZURE_TOKEN_CREDENTIALS`` defaults to ``AzureCliCredential`` (the ``az login``
+session). The default is deliberate. Left unset, Azure MCP Server 3.0.0 builds
+an interactive browser credential while it creates its credential chain, and on
+Linux that calls ``XOpenDisplay(":1")`` (``WindowHandleProvider.cs``), which
+ignores ``DISPLAY``. If the X socket ``@/tmp/.X11-unix/X1`` does not accept
+connections, that call never returns and every tool that needs a token hangs
+without an error. Pinning a specific credential skips the browser credential.
+Set ``AZURE_TOKEN_CREDENTIALS`` yourself to use something else, for example
+``EnvironmentCredential`` for a service principal or ``prod`` for a managed
+identity. Do not set it to ``dev`` or leave it empty: both keep the browser
+credential.
 """
 
 from mcp import StdioServerParameters
@@ -40,37 +59,51 @@ from .mcp_tools import McpServerConfig, forward_env
 # prompts and in `AdvisorAgent.get_agent_tools()`.
 AZURE_ADVISOR_SERVER_NAME = "azure_advisor"
 
-# The namespace exposes only read-only tools (metadata get/list, recommendation
-# list/summary/apply) — see docs/azure-advisor-mcp-server.md in the plan repo.
-# `--read-only` is redundant for this namespace today but kept as
-# defense-in-depth per PLAN.md section 3.
 AZURE_ADVISOR_NAMESPACE = "advisor"
+
+# PyPI package that ships the server, and the exact version that was checked
+# (the 3.0.0 `azmcp server start --help` lists --namespace and --read-only).
+AZURE_MCP_PACKAGE = "msmcp-azure"
+AZURE_MCP_VERSION = "3.0.0"
+
+# Credential the server uses unless AZURE_TOKEN_CREDENTIALS is set. See the
+# module docstring, "Credentials", for why it is pinned.
+DEFAULT_TOKEN_CREDENTIALS = "AzureCliCredential"
 
 
 def azure_advisor_server_config() -> McpServerConfig:
     """Build the config that starts the Azure MCP Server.
 
-    This spawns ``npx -y @azure/mcp@latest server start --namespace advisor
-    --read-only`` as a local subprocess, matching Microsoft's own sample and
-    PLAN.md section 3. Every set ``AZURE_*`` variable is forwarded to it (see
-    the module docstring, "Credentials").
+    This spawns ``uvx --from msmcp-azure==<version> azmcp server start
+    --namespace advisor --read-only`` as a local subprocess. Every set
+    ``AZURE_*`` variable is forwarded to it, and ``AZURE_TOKEN_CREDENTIALS``
+    defaults to ``AzureCliCredential`` when it is not set (see the module
+    docstring, "Credentials").
+
+    The first start downloads the package (about 60 MB); ``uvx`` caches it.
     """
+    # forward_env skips empty values, so an empty AZURE_TOKEN_CREDENTIALS also
+    # gets the default.
+    env = forward_env(prefixes=("AZURE_",))
+    env.setdefault("AZURE_TOKEN_CREDENTIALS", DEFAULT_TOKEN_CREDENTIALS)
     return McpServerConfig(
         name=AZURE_ADVISOR_SERVER_NAME,
         params=StdioServerParameters(
-            command="npx",
+            command="uvx",
             args=[
-                "-y",
-                "@azure/mcp@latest",
+                "--from",
+                f"{AZURE_MCP_PACKAGE}=={AZURE_MCP_VERSION}",
+                "azmcp",
                 "server",
                 "start",
                 "--namespace",
                 AZURE_ADVISOR_NAMESPACE,
                 "--read-only",
             ],
-            env=forward_env(prefixes=("AZURE_",)),
+            env=env,
         ),
-        # Every tool in this namespace is read-only.
+        # `--read-only` is meant to remove the write tools, so what is left
+        # needs no human in the loop. Confirm against the real tool list.
         requires_approval=lambda tool_name: False,
-        install_hint="Install Node.js (it provides npx) and make sure it is on PATH.",
+        install_hint="Install uv (it provides uvx) and make sure it is on PATH.",
     )

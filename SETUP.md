@@ -4,9 +4,10 @@
 
 - Python 3.10+
 - pip or poetry
-- Node.js / `npx` on PATH (used to spawn the Azure MCP Server subprocess)
-- `uv` / `uvx` on PATH (used to spawn the Jira MCP server subprocess, if Jira
-  is configured — see "Jira credentials" below)
+- `uv` / `uvx` on PATH. It spawns the Azure MCP Server subprocess (the
+  `msmcp-azure` package from PyPI, which bundles Microsoft's `azmcp` binary;
+  the first start downloads about 60 MB) and the Jira MCP server subprocess,
+  if Jira is configured — see "Jira credentials" below. Node.js is not needed.
 
 ## Installation
 
@@ -82,10 +83,18 @@ quietly running without Jira.
 
 ### 5. Azure credentials (optional)
 
-The Azure Advisor MCP server finds credentials through the standard Azure
-credential chain. `az login` works as is, because the server finds its token
-cache through `HOME`. For a service principal, set `AZURE_TENANT_ID`,
-`AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (see `.env.example`).
+By default the Azure Advisor MCP server uses your `az login` session
+(`AZURE_TOKEN_CREDENTIALS` defaults to `AzureCliCredential`), so run `az login`
+first. The server finds the token cache through `HOME`.
+
+The credential is pinned on purpose. With it unset, Azure MCP Server 3.0.0 looks
+for an X display on Linux (it connects to `:1`, whatever `DISPLAY` says), and if
+that connection is never accepted, every Azure tool call hangs with no error.
+
+For a service principal, set `AZURE_TOKEN_CREDENTIALS=EnvironmentCredential`
+together with `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`
+(see `.env.example`). Without the first variable the server keeps using
+`az login`. Avoid `dev` and an empty value: both bring back the X display lookup.
 
 The MCP servers are started with a minimal environment (`HOME`, `PATH`, proxy
 and CA settings, `TERM`, and so on). Only the set `AZURE_*` variables (Azure
@@ -113,7 +122,7 @@ examples/
 
 ### Running the Phase 0 spike
 
-Requires `npx` (Node.js) on PATH to spawn the Azure MCP Server, and an Azure
+Requires `uvx` on PATH to spawn the Azure MCP Server, and an Azure
 identity with Reader access on the target subscription(s) resolved via the
 standard Azure credential chain (e.g. `az login`, or a managed identity /
 service principal in the environment):
@@ -121,6 +130,13 @@ service principal in the environment):
 ```bash
 python -m advisor_agent.main --prompt "List Azure Advisor recommendations"
 ```
+
+A run can take a minute or more before anything is answered (the first start
+downloads the Azure server, and the model may call several tools). While it
+works, the agent prints progress lines to stderr, each prefixed with
+`[advisor-agent]`: server start, every model turn, every tool call and how
+long it has been running. The answer itself goes to stdout at the end. Pass
+`progress=` to `AdvisorAgent` to send the lines elsewhere or to silence them.
 
 ## Anthropic API with MCP tools
 

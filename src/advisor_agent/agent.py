@@ -43,6 +43,15 @@ needs a human "yes" first, and is never sent to the server without one. The
 default prompt (``cli_approval_callback``) asks on the terminal and denies
 when there is no terminal. Pass ``approval_callback`` to use another UI.
 
+Progress output
+---------------
+Starting the servers and waiting for the model can each take a minute or
+more, and the answer only exists at the end. So the agent reports each step
+(server start, every model turn, every tool call) as a line on stderr, with
+the time since the query started. Stdout is left for the answer. Pass
+``progress`` to send these lines elsewhere, or a function that does nothing
+to silence them.
+
 Session model
 -------------
 Connecting costs a subprocess start per server (the first Azure start also
@@ -72,9 +81,10 @@ import json
 import os
 import sys
 import threading
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from anthropic import AsyncAnthropic
 
@@ -101,6 +111,31 @@ DEFAULT_MAX_ITERATIONS = 25
 
 # How long close() waits for the MCP servers to shut down.
 _SHUTDOWN_TIMEOUT_SECONDS = 30.0
+
+# Receives one human-readable progress line at a time (see "Progress output").
+ProgressCallback = Callable[[str], None]
+
+
+def print_progress(message: str) -> None:
+    """Default progress sink: one line on stderr, so stdout stays the answer."""
+    print(f"[advisor-agent] {message}", file=sys.stderr, flush=True)
+
+
+def _escape(text: str) -> str:
+    """``text`` with control characters escaped, for printing model-chosen names.
+
+    The model's output can be steered by untrusted recommendation text, so a
+    tool name it writes is not trusted to be free of terminal escape sequences.
+    """
+    return json.dumps(text)[1:-1]
+
+
+def _count_errors(tool_results: Any) -> int:
+    """How many ``tool_result`` blocks in the runner's reply are marked ``is_error``."""
+    content = tool_results.get("content") if isinstance(tool_results, dict) else None
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for item in content if isinstance(item, dict) and item.get("is_error"))
 
 
 def build_server_configs() -> list[McpServerConfig]:
@@ -141,6 +176,7 @@ class AdvisorAgent:
         servers: Sequence[McpServerConfig] | None = None,
         client: AsyncAnthropic | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        progress: ProgressCallback | None = None,
     ):
         """
         Initialize the Advisor Agent.
@@ -155,6 +191,9 @@ class AdvisorAgent:
             client: An ``AsyncAnthropic`` to use instead of creating one, for
                 tests. The caller keeps ownership: ``close()`` does not close it.
             max_iterations: Maximum model turns per ``query()``.
+            progress: Receives one progress line at a time (server start,
+                model turns, tool calls). Defaults to printing them on
+                stderr; pass a function that does nothing to silence them.
 
         The API key is read from ``ANTHROPIC_API_KEY`` and is not a
         constructor argument. It is required unless ``client`` is given.
@@ -176,6 +215,7 @@ class AdvisorAgent:
         if len(set(names)) != len(names):
             raise ValueError(f"Duplicate MCP server names: {names}")
         self._approval_callback: ApprovalCallback = approval_callback or cli_approval_callback
+        self._progress: ProgressCallback = progress or print_progress
         self._api_key = api_key
         self._injected_client = client
 
@@ -352,6 +392,13 @@ When working with Advisor findings:
             if not ready.done():
                 ready.cancel()
 
+    def _report(self, message: str) -> None:
+        """Send one progress line. A failing sink must never break a query."""
+        try:
+            self._progress(message)
+        except Exception:
+            pass
+
     async def _open_connections(self, stack: AsyncExitStack) -> None:
         if self._injected_client is not None:
             client = self._injected_client
@@ -363,12 +410,24 @@ When working with Advisor findings:
 
         tools: list[McpTool] = []
         for config in self._servers:
+            started = time.monotonic()
+            self._report(
+                f"Starting MCP server '{config.name}' "
+                "(the first start can take a minute while its package is downloaded)..."
+            )
             server_tools = await start_mcp_server(stack, config, self._approval_callback)
             if not server_tools:
                 print(
                     f"Warning: MCP server '{config.name}' exposes no tools.",
                     file=sys.stderr,
                 )
+            # Tool names were checked against the API's name pattern in
+            # start_mcp_server, so they are safe to print as they are.
+            names = ", ".join(tool.name for tool in server_tools)
+            self._report(
+                f"MCP server '{config.name}' ready in {time.monotonic() - started:.1f}s: "
+                f"{len(server_tools)} tool(s)" + (f": {names}" if names else "")
+            )
             tools.extend(server_tools)
 
         # The model sees bare tool names, so two servers must not share one.
@@ -412,8 +471,15 @@ When working with Advisor findings:
             thread=False,
         )
 
+        started = time.monotonic()
+
+        def step(text: str) -> None:
+            self._report(f"[{time.monotonic() - started:5.1f}s] {text}")
+
         texts: list[str] = []
         last = None
+        turn = 1
+        step(f"Turn {turn}: waiting for {self.model} (up to {self.max_iterations} turns)...")
         try:
             async for message in runner:
                 last = message
@@ -421,11 +487,24 @@ When working with Advisor findings:
                 messages.append(message.to_param())
                 texts.append("".join(block.text for block in message.content if block.type == "text"))
                 if message.stop_reason == "tool_use":
+                    requested = [_escape(block.name) for block in message.content if block.type == "tool_use"]
+                    step(f"Turn {turn}: the model requested {len(requested)} tool call(s): {', '.join(requested)}")
                     # Runs the tools. The runner reuses this result for its
                     # next request instead of running them again.
                     tool_results = await runner.generate_tool_call_response()
+                    failed = 0
                     if tool_results is not None:
                         messages.append(dict(tool_results))
+                        failed = _count_errors(tool_results)
+                    step(
+                        f"Turn {turn}: tool calls finished"
+                        + (f" ({failed} returned an error or was denied)" if failed else "")
+                    )
+                    if turn < self.max_iterations:
+                        turn += 1
+                        step(f"Turn {turn}: waiting for {self.model}...")
+                else:
+                    step(f"Turn {turn}: answer received (stop reason: {message.stop_reason})")
         finally:
             with contextlib.suppress(Exception):
                 await runner.close()
