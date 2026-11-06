@@ -32,13 +32,23 @@ human in the loop.
 
 Credentials
 -----------
-Azure auth is resolved by the server via the standard Azure credential chain
-(``az login``, a managed identity, or a service principal). The server is
-started with a minimal environment (see ``mcp_tools.py``), so the ``AZURE_*``
-variables that are set in this process — ``AZURE_TENANT_ID``,
+The server is started with a minimal environment (see ``mcp_tools.py``), so the
+``AZURE_*`` variables that are set in this process — ``AZURE_TENANT_ID``,
 ``AZURE_CLIENT_ID``, ``AZURE_CLIENT_SECRET``, ``AZURE_TOKEN_CREDENTIALS`` and
 so on — are forwarded explicitly. ``az login`` needs no forwarding: its token
 cache is found through ``HOME``, which is inherited.
+
+``AZURE_TOKEN_CREDENTIALS`` defaults to ``AzureCliCredential`` (the ``az login``
+session). The default is deliberate. Left unset, Azure MCP Server 3.0.0 builds
+an interactive browser credential while it creates its credential chain, and on
+Linux that calls ``XOpenDisplay(":1")`` (``WindowHandleProvider.cs``), which
+ignores ``DISPLAY``. If the X socket ``@/tmp/.X11-unix/X1`` does not accept
+connections, that call never returns and every tool that needs a token hangs
+without an error. Pinning a specific credential skips the browser credential.
+Set ``AZURE_TOKEN_CREDENTIALS`` yourself to use something else, for example
+``EnvironmentCredential`` for a service principal or ``prod`` for a managed
+identity. Do not set it to ``dev`` or leave it empty: both keep the browser
+credential.
 """
 
 from mcp import StdioServerParameters
@@ -56,17 +66,26 @@ AZURE_ADVISOR_NAMESPACE = "advisor"
 AZURE_MCP_PACKAGE = "msmcp-azure"
 AZURE_MCP_VERSION = "3.0.0"
 
+# Credential the server uses unless AZURE_TOKEN_CREDENTIALS is set. See the
+# module docstring, "Credentials", for why it is pinned.
+DEFAULT_TOKEN_CREDENTIALS = "AzureCliCredential"
+
 
 def azure_advisor_server_config() -> McpServerConfig:
     """Build the config that starts the Azure MCP Server.
 
     This spawns ``uvx --from msmcp-azure==<version> azmcp server start
     --namespace advisor --read-only`` as a local subprocess. Every set
-    ``AZURE_*`` variable is forwarded to it (see the module docstring,
-    "Credentials").
+    ``AZURE_*`` variable is forwarded to it, and ``AZURE_TOKEN_CREDENTIALS``
+    defaults to ``AzureCliCredential`` when it is not set (see the module
+    docstring, "Credentials").
 
     The first start downloads the package (about 60 MB); ``uvx`` caches it.
     """
+    # forward_env skips empty values, so an empty AZURE_TOKEN_CREDENTIALS also
+    # gets the default.
+    env = forward_env(prefixes=("AZURE_",))
+    env.setdefault("AZURE_TOKEN_CREDENTIALS", DEFAULT_TOKEN_CREDENTIALS)
     return McpServerConfig(
         name=AZURE_ADVISOR_SERVER_NAME,
         params=StdioServerParameters(
@@ -81,7 +100,7 @@ def azure_advisor_server_config() -> McpServerConfig:
                 AZURE_ADVISOR_NAMESPACE,
                 "--read-only",
             ],
-            env=forward_env(prefixes=("AZURE_",)),
+            env=env,
         ),
         # `--read-only` is meant to remove the write tools, so what is left
         # needs no human in the loop. Confirm against the real tool list.

@@ -83,10 +83,18 @@ quietly running without Jira.
 
 ### 5. Azure credentials (optional)
 
-The Azure Advisor MCP server finds credentials through the standard Azure
-credential chain. `az login` works as is, because the server finds its token
-cache through `HOME`. For a service principal, set `AZURE_TENANT_ID`,
-`AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (see `.env.example`).
+By default the Azure Advisor MCP server uses your `az login` session
+(`AZURE_TOKEN_CREDENTIALS` defaults to `AzureCliCredential`), so run `az login`
+first. The server finds the token cache through `HOME`.
+
+The credential is pinned on purpose. With it unset, Azure MCP Server 3.0.0 looks
+for an X display on Linux (it connects to `:1`, whatever `DISPLAY` says), and if
+that connection is never accepted, every Azure tool call hangs with no error.
+
+For a service principal, set `AZURE_TOKEN_CREDENTIALS=EnvironmentCredential`
+together with `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`
+(see `.env.example`). Without the first variable the server keeps using
+`az login`. Avoid `dev` and an empty value: both bring back the X display lookup.
 
 The MCP servers are started with a minimal environment (`HOME`, `PATH`, proxy
 and CA settings, `TERM`, and so on). Only the set `AZURE_*` variables (Azure
