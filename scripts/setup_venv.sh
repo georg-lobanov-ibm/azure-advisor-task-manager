@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Create .venv and install requirements.txt into it.
+# Create .venv and install requirements-dev.txt (requirements.txt plus pytest)
+# into it.
 #
 # Run automatically by the "Setup virtualenv and install dependencies" task
 # (.vscode/tasks.json) before every launch configuration in
 # .vscode/launch.json. Safe to run repeatedly: the venv is only created if
-# missing, and dependencies are only reinstalled when requirements.txt is
-# newer than the last successful install.
+# missing, and dependencies are only reinstalled when requirements.txt or
+# requirements-dev.txt is newer than the last successful install.
 #
 # Uses uv if it's on PATH (SETUP.md lists it as a prerequisite for the Jira
 # MCP server), otherwise falls back to python3's built-in venv + pip.
@@ -24,7 +25,7 @@ fail() {
 
 if command -v uv >/dev/null 2>&1; then
     [ -x "$VENV/bin/python" ] || uv venv "$VENV"
-    install_requirements() { uv pip install --python "$VENV/bin/python" -r requirements.txt; }
+    install_requirements() { uv pip install --python "$VENV/bin/python" -r requirements-dev.txt; }
 else
     if [ ! -x "$VENV/bin/python" ]; then
         if ! python3 -m venv "$VENV"; then
@@ -37,10 +38,10 @@ else
     if ! "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
         fail "$VENV has no pip (was it created by uv?). Install uv so it is on PATH, or delete $VENV and re-run."
     fi
-    install_requirements() { "$VENV/bin/python" -m pip install -r requirements.txt; }
+    install_requirements() { "$VENV/bin/python" -m pip install -r requirements-dev.txt; }
 fi
 
-if [ ! -f "$STAMP" ] || [ requirements.txt -nt "$STAMP" ]; then
+if [ ! -f "$STAMP" ] || [ requirements.txt -nt "$STAMP" ] || [ requirements-dev.txt -nt "$STAMP" ]; then
     install_requirements
     touch "$STAMP"
 fi

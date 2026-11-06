@@ -24,6 +24,17 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+To also run the tests, install `requirements-dev.txt` instead (it includes
+`requirements.txt` and adds pytest). The VS Code launch configurations do this
+for you through `scripts/setup_venv.sh`.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The tests run offline: they need no Azure, Jira or Anthropic access.
+
 ### 3. Set Up Anthropic API Key
 
 Get your API key from [console.anthropic.com](https://console.anthropic.com):
@@ -113,12 +124,27 @@ src/advisor_agent/
 ├── main.py                # CLI entrypoint (Phase 0 spike)
 ├── policy.py               # Decision rules and thresholds
 ├── approval.py             # Approval UI
-├── database.py             # Database schema and queries
+├── database.py             # SQLite: Advisor finding ↔ Jira issue mappings and the audit log
 └── audit.py                # JSONL audit logging (TODO)
 
 examples/
 ├── agent_sdk_demo.py       # Agent usage examples (file name kept; launch.json refers to it)
+
+tests/                      # pytest, offline (run: python -m pytest)
 ```
+
+### The mapping database
+
+`workspace/advisor.db` (git-ignored) links Advisor findings to Jira issues. A
+finding is identified by its recommendation type ID plus the ID of the resource
+it applies to, compared without regard to case. The `id` GUID that Advisor puts
+on each recommendation is not used as the key because it does not stay the same.
+One Jira issue can be linked to one finding only.
+
+The file records its schema version. A file made with the earlier layout (keyed
+on the GUID) is not converted, since a GUID does not say which recommendation
+type it was; `AdvisorDatabase` refuses to open it and tells you to move it away
+so a new one is created.
 
 ### Running the Phase 0 spike
 
