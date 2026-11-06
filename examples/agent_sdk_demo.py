@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Demo of the Azure Advisor Task Manager using Claude Agent SDK.
+Demo of the Azure Advisor Task Manager using the Anthropic API and MCP tools.
 
 This demonstrates:
 1. Initializing the Advisor Agent
 2. Dry-run analysis of Azure Advisor findings
 3. Processing and proposing Jira changes
 4. Decision logging and audit trail
+
+Examples 1 and 2 call the Claude API and start the MCP servers (the Azure one
+needs Node.js/npx and Azure credentials). Examples 3, 4 and 5 only inspect the
+agent and make no API calls.
 """
 
 import sys
@@ -59,25 +63,23 @@ def demo_dry_run_analysis():
 def demo_available_tools():
     """Example 3: Available tools."""
     print("=" * 70)
-    print("Example 3: Built-in Tools Available to the Agent")
+    print("Example 3: MCP Servers Available to the Agent")
     print("=" * 70)
 
     with AdvisorAgent() as agent:
+        # Nothing is started yet, so this lists each configured server as
+        # "server:*". After the first query() it lists the real tool names.
         tools = agent.get_agent_tools()
 
-    print("\nThe Advisor Agent has access to these built-in tools:\n")
+    print("\nThe Advisor Agent's tools come from these MCP servers:\n")
     for tool in tools:
         print(f"  • {tool}")
 
-    print("\nThese allow the agent to:")
-    print("  • Read Azure Advisor findings and database records")
-    print("  • Write audit logs and decision records")
-    print("  • Execute bash commands for complex operations")
-    print("  • Search file systems for historical data")
-    print("  • Access external information via web search")
-    print("  • Connect to the Azure Advisor MCP server (read-only)")
-    print("  • Connect to the Jira MCP server, if configured (reads allowed,")
-    print("    writes gated behind human approval)")
+    print("\nThe agent has no file, shell or web tools. Through the servers it can:")
+    print("  • Read Azure Advisor recommendations (read-only server)")
+    print("  • Read Jira issues, if the Jira server is configured")
+    print("  • Change Jira only after you approve each call on the terminal")
+    print("    (calls are denied automatically when there is no terminal)")
 
 
 def demo_decision_logging():

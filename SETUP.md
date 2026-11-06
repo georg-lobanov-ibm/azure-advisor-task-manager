@@ -1,4 +1,4 @@
-# Azure Advisor Task Manager - Python Setup with Claude Agent SDK
+# Azure Advisor Task Manager - Python Setup with the Anthropic API
 
 ## Prerequisites
 
@@ -49,6 +49,12 @@ set, check that `.env` exists in the repo root and that the line has the form
 
 The `envFile` entries in `.vscode/launch.json` are not relied on for this.
 
+The agent always calls `https://api.anthropic.com` with `ANTHROPIC_API_KEY`.
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_MODEL` in your
+environment (for example a company gateway set up for Claude Code) are
+deliberately ignored. Pick the model with `--model` or the `model` argument of
+`AdvisorAgent`.
+
 To export everything in it to your shell (a plain `source .env` would not
 export the variables to child processes):
 
@@ -70,16 +76,31 @@ export JIRA_API_TOKEN='...'
 ```
 
 If these aren't set, `AdvisorAgent` prints a warning and runs with only the
-Azure Advisor MCP server attached — Jira is optional, not required.
+Azure Advisor MCP server attached — Jira is optional, not required. If they are
+set but the server fails to start, `AdvisorAgent` raises an error instead of
+quietly running without Jira.
+
+### 5. Azure credentials (optional)
+
+The Azure Advisor MCP server finds credentials through the standard Azure
+credential chain. `az login` works as is, because the server finds its token
+cache through `HOME`. For a service principal, set `AZURE_TENANT_ID`,
+`AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (see `.env.example`).
+
+The MCP servers are started with a minimal environment (`HOME`, `PATH`, proxy
+and CA settings, `TERM`, and so on). Only the set `AZURE_*` variables (Azure
+server) or the chosen `JIRA_*` variables (Jira server) are added to that, so
+`ANTHROPIC_API_KEY` and everything else in your shell never reach them.
 
 ## Project Structure
 
 ```
 src/advisor_agent/
 ├── __init__.py
-├── agent.py               # Main Agent SDK implementation; composes both MCP servers (ACTIVE)
+├── agent.py               # Main agent: Anthropic API + tool runner; composes both MCP servers (ACTIVE)
+├── mcp_tools.py            # MCP stdio plumbing and the human-approval gate for tools (ACTIVE)
 ├── azure_mcp.py            # Azure Advisor MCP server wiring (ACTIVE)
-├── jira_mcp.py             # Jira/Atlassian MCP server wiring + write-tool approval hook (ACTIVE)
+├── jira_mcp.py             # Jira/Atlassian MCP server wiring + which tools need approval (ACTIVE)
 ├── main.py                # CLI entrypoint (Phase 0 spike)
 ├── policy.py               # Decision rules and thresholds
 ├── approval.py             # Approval UI
@@ -87,7 +108,7 @@ src/advisor_agent/
 └── audit.py                # JSONL audit logging (TODO)
 
 examples/
-├── agent_sdk_demo.py       # Agent SDK usage examples
+├── agent_sdk_demo.py       # Agent usage examples (file name kept; launch.json refers to it)
 ```
 
 ### Running the Phase 0 spike
@@ -101,25 +122,25 @@ service principal in the environment):
 python -m advisor_agent.main --prompt "List Azure Advisor recommendations"
 ```
 
-## Claude Agent SDK
+## Anthropic API with MCP tools
 
-This project is built exclusively on the **Claude Agent SDK**, which is
-purpose-built for autonomous agents and provides:
+The agent calls the Claude API directly through the `anthropic` Python SDK. Its
+tool loop is the SDK's tool runner (`client.beta.messages.tool_runner`), and the
+tools are those of the two MCP servers, which the `mcp` package starts as local
+stdio subprocesses. This does not use Claude Code or the Claude Agent SDK, so
+settings in `~/.claude/settings.json` have no effect on it.
 
-✅ **Built-in Tools**: File read/write, bash execution, grep, web search (out of the box)
-✅ **Full Agent Loop**: Claude automatically decides when to use tools and executes them
-✅ **Context Management**: Handles conversation history, memory, and session state
-✅ **MCP Integration**: Connects to the Azure Advisor MCP server (`azure_mcp.py`) and, if configured, the Jira MCP server (`jira_mcp.py`); `agent.py` composes both
+✅ **Agent loop**: Claude decides when to call tools; the tool runner executes them and feeds the results back until Claude is done (at most 25 model turns per query)
+✅ **MCP tools only**: Azure Advisor (`azure_mcp.py`) and, if configured, Jira (`jira_mcp.py`); `agent.py` composes both. The model has no file, shell or web tools
+✅ **Sessions**: `AdvisorAgent` starts the MCP servers on the first query and keeps them, and the conversation, for its lifetime. A follow-up `query()` sees earlier answers; `reset_conversation()` forgets them
+✅ **Approval gates**: Azure Advisor tools are read-only and run freely. Of the Jira tools only `jira_search`, `jira_get_issue` and `jira_get_transitions` run freely; every other Jira tool, including any the agent doesn't know about, asks for approval on the terminal for each call and is not sent to the server without a "yes" (`mcp_tools.py`, `jira_mcp.py`)
+✅ **Fails closed**: if stdin or stderr is not a terminal (a scheduled run, CI), approval-gated calls are denied, and the model is told so
 ✅ **Audit Trail**: Structured logging and decision tracking
-✅ **Sessions**: Persistent agent state — `AdvisorAgent` keeps one `ClaudeSDKClient` connected for its lifetime and reuses it across calls, instead of reconnecting per query
-✅ **Approval Gates**: Jira write tools (`mcp__jira__*`) are blocked until a human approves them, via a `PreToolUse` hook (`jira_mcp.py`) — not just an `allowed_tools` omission, since hooks run before `allowed_tools` is evaluated
 
-### Agent SDK Usage
+### Usage
 
-The agent keeps a persistent `ClaudeSDKClient` connection (and its Azure MCP
-subprocess) open for its lifetime, reusing it across every `.query()` call
-on the same instance instead of reconnecting each time. Use it as a context
-manager so the connection is cleanly closed when you're done (or call
+Use the agent as a context manager so the MCP servers and the background
+thread that owns them are cleanly stopped when you're done (or call
 `agent.close()` yourself):
 
 ```python
@@ -129,7 +150,7 @@ with AdvisorAgent(model="claude-opus-5-5") as agent:
     # Query the agent (it handles everything: tools, loops, decisions)
     response = agent.query("Process Azure Advisor findings for this subscription")
 
-    # Dry-run analysis (no actual changes) — reuses the same connection
+    # Dry-run analysis (no actual changes) — reuses the same MCP servers
     result = agent.process_findings_dry_run(
         subscription_id="12345678-1234-1234-1234-123456789012",
         jira_project="AZURE",
@@ -163,15 +184,15 @@ python examples/agent_sdk_demo.py
 This runs through:
 1. Basic agent interaction
 2. Dry-run analysis of Azure Advisor findings
-3. Available built-in tools
+3. The MCP servers (and their approval rules) available to the agent
 4. Decision logging and audit trail
 5. The agent's system prompt
 
 ## Key Features Implemented
 
-✅ Claude Agent SDK integration (`agent.py`)
-✅ Azure Advisor MCP server connection, spawned as a local stdio subprocess (`azure_mcp.py`)
-✅ Jira MCP server connection, spawned as a local stdio subprocess if configured, with write tools gated behind approval (`jira_mcp.py`)
+✅ Anthropic API integration with the SDK tool runner (`agent.py`, `mcp_tools.py`)
+✅ Azure Advisor MCP server wiring, spawned as a local stdio subprocess (`azure_mcp.py`)
+✅ Jira MCP server wiring, spawned as a local stdio subprocess if configured, with every non-read tool gated behind approval (`jira_mcp.py`)
 ✅ Decision policy engine with impact thresholds (`policy.py`)
 ✅ SQLite persistence and audit trail (`database.py`)
 ✅ Human-in-the-loop approval workflow (`approval.py`)
@@ -179,8 +200,8 @@ This runs through:
 ## Next Steps
 
 ### Phase 0 - Spike (Current)
-- [x] Connect to real Azure MCP server
-- [x] Connect to real Jira MCP server
+- [ ] Connect to real Azure MCP server (wired through the Anthropic API; not yet verified live)
+- [ ] Connect to real Jira MCP server (wired through the Anthropic API; not yet verified live)
 - [ ] Verify tool names and capabilities against a live Jira MCP server (currently based on docs/jira-mcp-server.md research only)
 
 ### Phase 1 - MVP
@@ -205,6 +226,6 @@ This runs through:
 ## References
 
 - [Anthropic API Documentation](https://docs.anthropic.com)
-- [Claude Agent SDK](https://docs.anthropic.com/claude/docs/claude-agent-sdk)
+- [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) (tool runner and MCP helpers)
 - [Claude Models Overview](https://docs.anthropic.com/claude/reference/models-overview)
 - [MCP (Model Context Protocol)](https://docs.anthropic.com/claude/docs/mcp)

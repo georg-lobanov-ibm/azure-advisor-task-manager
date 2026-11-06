@@ -1,5 +1,5 @@
 """
-Claude Agent SDK implementation for the Azure Advisor Task Manager.
+Azure Advisor Task Manager agent, built on the Anthropic API.
 
 This module provides the core agent that orchestrates:
 1. Reading Azure Advisor recommendations via MCP server
@@ -7,101 +7,118 @@ This module provides the core agent that orchestrates:
 3. Syncing with Jira via MCP server
 4. Maintaining an audit trail
 
-The agent has access to:
-- Built-in tools: file read/write, bash execution, web search
-- Custom tools: MCP server connections for Azure and Jira
-- Full agent loop with context management
-- Sessions for persistent state
+How it runs
+-----------
+The agent calls the Claude API directly: ``anthropic.AsyncAnthropic`` plus the
+SDK's tool runner (``client.beta.messages.tool_runner``), which loops
+"model -> tool calls -> tool results -> model" until the model is done. It
+always talks to https://api.anthropic.com and authenticates with
+``ANTHROPIC_API_KEY``. A gateway configured through ``ANTHROPIC_BASE_URL``,
+``ANTHROPIC_AUTH_TOKEN`` or ``ANTHROPIC_MODEL`` in the environment is
+deliberately ignored; the model is the ``model`` argument.
+
+The only tools the model gets are the MCP tools of the configured servers.
+It has no file, shell or web tools.
 
 MCP integration
 ----------------
 Per the implementation plan (``azure-advisor-task-manager-plan/PLAN.md``,
-section 3 "MCP integration"), the agent connects to both MCP servers
-directly as an MCP client via the Claude Agent SDK's ``mcp_servers`` option —
-it does not shell out to a CLI per call. The SDK spawns each server as a
-local stdio subprocess and speaks MCP to it directly.
+section 3 "MCP integration"), the agent is an MCP client of both servers: the
+``mcp`` package starts each as a local stdio subprocess, and its tools are
+handed to the tool runner (see ``mcp_tools.py``).
 
 The Azure Advisor wiring (``azure_mcp.py``) and the Jira wiring
 (``jira_mcp.py``) are deliberately kept in separate modules, each owning its
-own server config and (where applicable) approval logic; this file's
-``build_agent_options`` composes both into one ``ClaudeAgentOptions``. Jira
-credentials are optional: if they aren't configured, the agent runs with only
-the Azure Advisor MCP server attached and prints a warning (see
-``jira_mcp.py`` and ``build_agent_options``).
+own server config and approval rule; this file's ``build_server_configs``
+composes both. Jira credentials are optional: if they aren't configured, the
+agent runs with only the Azure Advisor MCP server attached and prints a
+warning. A server that is configured but fails to start is an error, not a
+silent downgrade.
+
+Approval gate
+-------------
+Azure Advisor tools are read-only and run freely. Jira tools run freely only
+if they are known reads (``JIRA_READ_TOOLS``); every other Jira tool call
+needs a human "yes" first, and is never sent to the server without one. The
+default prompt (``cli_approval_callback``) asks on the terminal and denies
+when there is no terminal. Pass ``approval_callback`` to use another UI.
 
 Session model
 -------------
-``AdvisorAgent`` uses ``ClaudeSDKClient`` rather than the SDK's one-shot
-``query()`` function, and keeps the client connected for the lifetime of the
-``AdvisorAgent`` instance. The one-shot function connects, runs a single
-exchange, and disconnects internally on every call, which would respawn the
-Azure MCP server subprocess on every ``agent.query(...)`` call even against
-the same instance. Here, the connection (and its MCP subprocess) is
-established lazily on first use and reused across every subsequent
-``.query()`` call on that instance. Because ``query()`` is a sync method
-backed by ``asyncio.run()`` historically, and asyncio resources can't cross
-separate ``asyncio.run()`` calls, the persistent client is driven by a
-dedicated background event loop thread that outlives any single call.
+Connecting costs a subprocess start per server (the first Azure start also
+downloads the package), so the connections are opened lazily on the first
+``query()`` and kept for the lifetime of the ``AdvisorAgent``. The
+conversation is kept too: every ``query()`` continues the same message
+history, so a follow-up question sees earlier answers and tool results. The
+history is not trimmed; call ``reset_conversation()`` to start over (for
+example between unrelated runs, to keep the context small).
+
+``query()`` is a sync method. The connections are asyncio resources that
+cannot cross separate ``asyncio.run()`` calls, so they live on a dedicated
+background event loop thread, inside one owner task that opens them and later
+closes them (their task groups must be exited by the task that entered them).
 
 Call ``AdvisorAgent.close()`` (or use the instance as a context manager,
-``with AdvisorAgent(...) as agent:``) when done, to disconnect the client and
-stop the background thread.
+``with AdvisorAgent(...) as agent:``) when done, to stop the MCP servers and
+the background thread.
 """
 
+from __future__ import annotations
+
 import asyncio
+import concurrent.futures
+import contextlib
 import json
 import os
 import sys
 import threading
+from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, TextBlock
+from anthropic import AsyncAnthropic
 
-from .azure_mcp import (
-    AZURE_ADVISOR_SERVER_NAME,
-    azure_advisor_allowed_tools,
-    azure_advisor_mcp_server_config,
+from .azure_mcp import azure_advisor_server_config
+from .jira_mcp import jira_server_config
+from .mcp_tools import (
+    ApprovalCallback,
+    McpServerConfig,
+    McpServerStartError,
+    McpTool,
+    cli_approval_callback,
+    start_mcp_server,
 )
-from .jira_mcp import (
-    JIRA_SERVER_NAME,
-    jira_allowed_tools,
-    jira_approval_hook_matcher,
-    jira_mcp_server_config,
-)
+
+# The agent always uses the public API, never a gateway from the environment.
+ANTHROPIC_API_URL = "https://api.anthropic.com"
+
+# Upper bound on one model response. Kept below the size at which the SDK
+# insists on streaming for a non-streaming request.
+MAX_OUTPUT_TOKENS = 16000
+
+# Upper bound on model turns within one query() (each turn may call tools).
+DEFAULT_MAX_ITERATIONS = 25
+
+# How long close() waits for the MCP servers to shut down.
+_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
 
-def build_agent_options(**overrides: Any) -> ClaudeAgentOptions:
-    """``ClaudeAgentOptions`` with the Azure Advisor and Jira MCP servers attached.
+def build_server_configs() -> list[McpServerConfig]:
+    """The MCP servers the agent starts: Azure Advisor, plus Jira if configured.
 
     Composes the two servers' wiring, each defined in its own module
-    (``azure_mcp.py``, ``jira_mcp.py``) so their configs and approval logic
-    can be read and changed independently of this composer and of each
-    other. Azure Advisor tools are all read-only and wildcard-allowed
-    outright (see ``azure_mcp.py``). Jira tools are wildcard-allowed too, but
-    Jira *write* tools are additionally gated behind human approval by a
-    ``PreToolUse`` hook from ``jira_mcp.py`` — hooks run before
-    ``allowed_tools`` is evaluated, so that gate holds even though the
-    wildcard below also matches write tool names.
+    (``azure_mcp.py``, ``jira_mcp.py``) so their configs and approval rules
+    can be read and changed independently of this composer and of each other.
 
-    Jira credentials are optional: if ``jira_mcp_server_config()`` can't find
-    them in the environment, this prints a warning to stderr and returns
-    options with only the Azure Advisor server attached, same as before Jira
-    was wired up.
-
-    Any keyword in ``overrides`` is merged in last, so callers can extend or
-    replace defaults (e.g. pass a different ``permission_mode``, ``model`` or
-    ``system_prompt``) without duplicating this wiring.
+    Jira credentials are optional: if ``jira_server_config()`` can't find
+    them in the environment, this prints a warning to stderr and returns only
+    the Azure Advisor server.
     """
-    mcp_servers: dict[str, Any] = {AZURE_ADVISOR_SERVER_NAME: azure_advisor_mcp_server_config()}
-    allowed_tools: list[str] = azure_advisor_allowed_tools()
-    hooks: dict[str, list[Any]] = {}
+    configs = [azure_advisor_server_config()]
 
-    jira_config = jira_mcp_server_config()
+    jira_config = jira_server_config()
     if jira_config is not None:
-        mcp_servers[JIRA_SERVER_NAME] = jira_config
-        allowed_tools.extend(jira_allowed_tools())
-        hooks["PreToolUse"] = [jira_approval_hook_matcher()]
+        configs.append(jira_config)
     else:
         print(
             "Warning: Jira MCP server not configured (set JIRA_URL plus "
@@ -109,24 +126,21 @@ def build_agent_options(**overrides: Any) -> ClaudeAgentOptions:
             "with the Azure Advisor MCP server only.",
             file=sys.stderr,
         )
-
-    options_kwargs: dict[str, Any] = {
-        "mcp_servers": mcp_servers,
-        "allowed_tools": allowed_tools,
-    }
-    if hooks:
-        options_kwargs["hooks"] = hooks
-    options_kwargs.update(overrides)
-    return ClaudeAgentOptions(**options_kwargs)
+    return configs
 
 
 class AdvisorAgent:
-    """Azure Advisor Task Manager Agent using Claude Agent SDK."""
+    """Azure Advisor Task Manager Agent using the Anthropic API and MCP tools."""
 
     def __init__(
         self,
         model: str = "claude-opus-5-5",
         workspace_dir: str | None = None,
+        *,
+        approval_callback: ApprovalCallback | None = None,
+        servers: Sequence[McpServerConfig] | None = None,
+        client: AsyncAnthropic | None = None,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
     ):
         """
         Initialize the Advisor Agent.
@@ -134,42 +148,58 @@ class AdvisorAgent:
         Args:
             model: Claude model to use. Defaults to Claude Opus 5.5.
             workspace_dir: Directory for agent workspace. Defaults to ./workspace.
+            approval_callback: Decides whether a gated tool call may run.
+                Defaults to a terminal prompt that denies when there is no
+                terminal (see ``cli_approval_callback``).
+            servers: MCP servers to start. Defaults to ``build_server_configs()``.
+            client: An ``AsyncAnthropic`` to use instead of creating one, for
+                tests. The caller keeps ownership: ``close()`` does not close it.
+            max_iterations: Maximum model turns per ``query()``.
 
-        The SDK authenticates the same way the Claude Code CLI does (e.g. via
-        the ANTHROPIC_API_KEY environment variable); it is not passed as a
-        constructor argument here.
+        The API key is read from ``ANTHROPIC_API_KEY`` and is not a
+        constructor argument. It is required unless ``client`` is given.
         """
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if client is None and not api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable not set")
 
         self.model = model
+        self.max_iterations = max_iterations
         self.workspace_dir = Path(workspace_dir or "./workspace")
         self.workspace_dir.mkdir(exist_ok=True)
 
-        # Build the system prompt and the agent options (both MCP servers;
-        # see module docstring and build_agent_options).
         self.system_prompt = self._build_system_prompt()
-        self.options = build_agent_options(
-            model=self.model,
-            system_prompt=self.system_prompt,
+        self._servers: list[McpServerConfig] = (
+            list(servers) if servers is not None else build_server_configs()
         )
+        names = [config.name for config in self._servers]
+        if len(set(names)) != len(names):
+            raise ValueError(f"Duplicate MCP server names: {names}")
+        self._approval_callback: ApprovalCallback = approval_callback or cli_approval_callback
+        self._api_key = api_key
+        self._injected_client = client
 
-        # Persistent ClaudeSDKClient session (see module docstring "Session
-        # model"). The client is created and connected lazily on first
-        # query(); the background loop/thread live for this instance's
-        # lifetime so the connection survives across separate sync query()
-        # calls. Call close() (or use `with AdvisorAgent(...) as agent:`) to
-        # release both.
+        # Set by _open_connections() on the loop thread (see "Session model").
+        self._client: AsyncAnthropic | None = None
+        self._tools: list[McpTool] = []
+        # The conversation so far, as API message params. Replaced only after
+        # a query() succeeds, so a failed query leaves it untouched.
+        self._history: list[dict[str, Any]] = []
+
+        # Background loop for the connections; lives for this instance's
+        # lifetime so they survive across separate sync query() calls. Call
+        # close() (or use `with AdvisorAgent(...) as agent:`) to release it.
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
             target=self._loop.run_forever, name="advisor-agent-loop", daemon=True
         )
         self._loop_thread.start()
-        self._client: ClaudeSDKClient | None = None
+        self._owner: concurrent.futures.Future[None] | None = None
+        self._stop: asyncio.Event | None = None
         self._connected = False
         self._closed = False
-        # Serializes query()/receive_response() pairs on the shared
-        # connection if query() is ever called from multiple threads.
+        # Serializes query() calls on the shared connections and history if
+        # query() is ever called from multiple threads.
         self._query_lock = threading.Lock()
 
     def _build_system_prompt(self) -> str:
@@ -220,16 +250,18 @@ When working with Advisor findings:
         """
         Query the agent to process Azure Advisor findings and Jira sync.
 
-        Uses the persistent `ClaudeSDKClient` connection (see module
-        docstring "Session model"), connecting it on first use and reusing
-        it on every subsequent call to this method on this instance.
+        Starts the MCP servers on first use and reuses them, and the
+        conversation so far, on every later call (see module docstring
+        "Session model"). Blocks until the model has finished, including any
+        tool calls it made and any approvals they needed.
 
         Args:
             prompt: The user's request to the agent.
             context: Optional context dict with Azure subscription ID, Jira project, etc.
 
         Returns:
-            The agent's response/analysis (concatenated text blocks).
+            The agent's final answer: the text of its last response, or all
+            text it produced if the last response had none.
         """
         # Build context if provided
         context_str = ""
@@ -239,68 +271,207 @@ When working with Advisor findings:
         full_prompt = f"{prompt}{context_str}"
 
         with self._query_lock:
+            if self._closed:
+                raise RuntimeError("AdvisorAgent is closed")
             self._ensure_connected()
             return self._run_coroutine(self._aquery(full_prompt))
 
+    def reset_conversation(self) -> None:
+        """Forget the conversation so far. The MCP connections stay open."""
+        with self._query_lock:
+            self._history = []
+
     def _run_coroutine(self, coro: Any) -> Any:
         """Run a coroutine on this instance's background event loop and block for the result."""
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result()
+        except BaseException:
+            # Ctrl-C while waiting: stop the work instead of leaving it
+            # running in the background. A no-op if it already finished.
+            future.cancel()
+            raise
 
     def _ensure_connected(self) -> None:
-        """Create and connect the `ClaudeSDKClient` on first use, if not already connected."""
-        if not self._connected:
-            self._client = ClaudeSDKClient(options=self.options)
-            self._run_coroutine(self._client.connect())
-            self._connected = True
+        """Start the MCP servers on first use, if not already connected."""
+        if self._connected:
+            return
+
+        ready: concurrent.futures.Future[None] = concurrent.futures.Future()
+        owner = asyncio.run_coroutine_threadsafe(self._own_connections(ready), self._loop)
+        try:
+            ready.result()
+        except Exception:
+            # Startup failed and the owner task is unwinding whatever it had
+            # opened. Let it finish so no server process is left behind.
+            self._wait_for_owner(owner)
+            raise
+        except BaseException:
+            owner.cancel()
+            self._wait_for_owner(owner)
+            raise
+        self._owner = owner
+        self._connected = True
+
+    @staticmethod
+    def _wait_for_owner(owner: concurrent.futures.Future[None]) -> None:
+        try:
+            owner.result(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            print(
+                "Warning: timed out waiting for the MCP servers to shut down.",
+                file=sys.stderr,
+            )
+        except BaseException:
+            pass  # already reported through `ready` or the warning in _own_connections
+
+    async def _own_connections(self, ready: concurrent.futures.Future[None]) -> None:
+        """Owner task: open every connection, report ready, wait to be stopped, close them.
+
+        The transports and sessions use task groups, which must be exited by
+        the task that entered them. Everything is therefore opened and closed
+        right here, in this one task, through a single exit stack.
+        """
+        stop = asyncio.Event()
+        try:
+            async with AsyncExitStack() as stack:
+                try:
+                    await self._open_connections(stack)
+                except Exception as exc:
+                    ready.set_exception(exc)
+                    return  # leaving the stack closes whatever was opened
+                self._stop = stop
+                ready.set_result(None)
+                await stop.wait()
+        except Exception as exc:
+            print(
+                f"Warning: error while shutting down MCP servers: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        finally:
+            if not ready.done():
+                ready.cancel()
+
+    async def _open_connections(self, stack: AsyncExitStack) -> None:
+        if self._injected_client is not None:
+            client = self._injected_client
+        else:
+            # Explicit key and URL: the SDK then ignores ANTHROPIC_AUTH_TOKEN
+            # and ANTHROPIC_BASE_URL from the environment.
+            client = AsyncAnthropic(api_key=self._api_key, base_url=ANTHROPIC_API_URL)
+            stack.push_async_callback(client.close)
+
+        tools: list[McpTool] = []
+        for config in self._servers:
+            server_tools = await start_mcp_server(stack, config, self._approval_callback)
+            if not server_tools:
+                print(
+                    f"Warning: MCP server '{config.name}' exposes no tools.",
+                    file=sys.stderr,
+                )
+            tools.extend(server_tools)
+
+        # The model sees bare tool names, so two servers must not share one.
+        owner_of: dict[str, str] = {}
+        for tool in tools:
+            if tool.name in owner_of:
+                raise McpServerStartError(
+                    f"Tool name '{tool.name}' is exposed by both MCP server "
+                    f"'{owner_of[tool.name]}' and '{tool.server}'."
+                )
+            owner_of[tool.name] = tool.server
+
+        self._client = client
+        self._tools = tools
 
     async def _aquery(self, prompt: str) -> str:
         """
-        Send one prompt through the persistent client and collect the response text.
+        Run one prompt through the tool runner and return the answer text.
 
-        Sends `prompt` via `ClaudeSDKClient.query()` and drains
-        `receive_response()` (which stops once it yields the `ResultMessage`
-        for this exchange), extracting the plain text from every
-        `AssistantMessage`. Must be called with `self._client` already
-        connected (see `_ensure_connected`).
-
-        Args:
-            prompt: The fully-built prompt (including any context) to send.
-
-        Returns:
-            The concatenated text content of the agent's response.
+        Must be called after ``_ensure_connected``. Sends the conversation so
+        far plus ``prompt``, lets the runner loop until the model stops asking
+        for tools, and then commits the new messages to ``self._history``.
         """
         assert self._client is not None  # _ensure_connected() runs first
 
-        await self._client.query(prompt)
+        # Rebuilt on every call and committed only on success, so a failed
+        # query leaves the history exactly as it was.
+        messages: list[dict[str, Any]] = [*self._history, {"role": "user", "content": prompt}]
 
-        chunks: list[str] = []
-        async for message in self._client.receive_response():
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        chunks.append(block.text)
+        runner = self._client.beta.messages.tool_runner(
+            model=self.model,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            system=self.system_prompt,
+            thinking={"type": "adaptive"},
+            tools=[tool.runnable for tool in self._tools],
+            messages=list(messages),
+            max_iterations=self.max_iterations,
+            # We hold the history ourselves and resend it in full, as the API
+            # expects when talking to it directly. (The default is a
+            # server-held message thread that would only be sent the new turns.)
+            thread=False,
+        )
 
-        return "".join(chunks)
+        texts: list[str] = []
+        last = None
+        try:
+            async for message in runner:
+                last = message
+                # Keeps thinking blocks, which must go back unchanged.
+                messages.append(message.to_param())
+                texts.append("".join(block.text for block in message.content if block.type == "text"))
+                if message.stop_reason == "tool_use":
+                    # Runs the tools. The runner reuses this result for its
+                    # next request instead of running them again.
+                    tool_results = await runner.generate_tool_call_response()
+                    if tool_results is not None:
+                        messages.append(dict(tool_results))
+        finally:
+            with contextlib.suppress(Exception):
+                await runner.close()
+
+        if last is None:
+            raise RuntimeError("The model returned no response.")
+
+        self._history = messages
+
+        if last.stop_reason == "tool_use":
+            print(
+                f"Warning: stopped after {self.max_iterations} model turns while the model "
+                "still wanted to call tools; the answer may be incomplete.",
+                file=sys.stderr,
+            )
+        elif last.stop_reason not in ("end_turn", "stop_sequence"):
+            print(
+                f"Warning: the model stopped with reason '{last.stop_reason}'; "
+                "the answer may be incomplete.",
+                file=sys.stderr,
+            )
+
+        return texts[-1] or "\n\n".join(text for text in texts if text)
 
     def close(self) -> None:
         """
-        Disconnect the MCP client and stop the background event loop.
+        Stop the MCP servers and the background event loop.
 
         Idempotent — safe to call more than once (e.g. from both an explicit
         `close()` and `__exit__`). Call this (or use `AdvisorAgent` as a
-        context manager) when done with the agent to release the connection,
-        its MCP subprocess, and the background thread.
+        context manager) when done with the agent to release the MCP
+        subprocesses and the background thread.
         """
         if self._closed:
             return
         self._closed = True
 
-        if self._connected:
-            self._run_coroutine(self._client.disconnect())
+        if self._connected and self._owner is not None and self._stop is not None:
+            self._loop.call_soon_threadsafe(self._stop.set)
+            self._wait_for_owner(self._owner)
             self._connected = False
 
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._loop_thread.join(timeout=5)
+        if not self._loop_thread.is_alive():
+            self._loop.close()
 
     def __enter__(self) -> "AdvisorAgent":
         return self
@@ -379,37 +550,25 @@ Return a structured JSON proposal with:
 
     def get_agent_tools(self) -> list[str]:
         """
-        Get list of tools available to the agent.
+        Get the tools available to the agent, as ``server:tool`` names.
 
-        Built-in tools (subject to normal permission handling, not
-        auto-approved by `allowed_tools`):
-        - Read files: for accessing audit logs, databases
-        - Write files: for storing decisions and audit trails
-        - Edit files: for updating configurations
-        - Bash: for running scripts, database queries
-        - Grep: for searching logs
-        - Web search: for external context
+        The model has no built-in file, shell or web tools; its tools are
+        exactly those of the MCP servers:
+        - Azure Advisor tools (read-only; see ``azure_mcp.py``)
+        - Jira tools, only if Jira credentials are configured. Read tools run
+          freely; every other tool needs human approval per call (see
+          ``jira_mcp.py``).
 
-        MCP server tools:
-        - Azure Advisor tools (read-only, auto-approved via `allowed_tools`
-          — `mcp__azure_advisor__*`; see `build_agent_options`)
-        - Jira tools (`mcp__jira__*`; read tools auto-approved, write tools
-          gated behind human approval by a `PreToolUse` hook — see
-          `jira_mcp.py`. Only attached if Jira credentials are configured.)
+        Before the first ``query()`` the servers have not been started, so
+        each configured server is listed as ``server:*``. Afterwards the real
+        tool names are listed.
 
         Returns:
             List of available tool names.
         """
-        return [
-            "read",
-            "write",
-            "edit",
-            "bash",
-            "grep",
-            "web_search",
-            f"mcp__{AZURE_ADVISOR_SERVER_NAME}__*",
-            f"mcp__{JIRA_SERVER_NAME}__*",
-        ]
+        if self._connected:
+            return [f"{tool.server}:{tool.name}" for tool in self._tools]
+        return [f"{config.name}:*" for config in self._servers]
 
     def save_decision_log(self, decision: dict) -> None:
         """

@@ -1,9 +1,10 @@
 """CLI entrypoint for the Azure Advisor Task Manager agent.
 
-Phase 0 spike (PLAN.md section 9): bring up the Azure Advisor MCP server via
-the Claude Agent SDK and send it a prompt, to confirm the end-to-end MCP
-connection works before any decision policy, approval flow, or database
-wiring is exercised against live Azure data.
+Phase 0 spike (PLAN.md section 9): start the Azure Advisor MCP server (and
+the Jira MCP server, if configured) and send a prompt to Claude through the
+Anthropic API, to confirm the end-to-end MCP connection works before any
+decision policy or database wiring is exercised against live Azure data.
+Jira tools that can change something ask for approval on the terminal first.
 """
 
 from __future__ import annotations
@@ -31,13 +32,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="advisor-agent",
         description=(
             "Azure Advisor Task Manager agent. Starts the Azure Advisor MCP "
-            "server and sends it a prompt."
+            "server (and the Jira MCP server, if configured) and sends the "
+            "agent a prompt."
         ),
     )
     parser.add_argument(
         "--prompt",
         default=DEFAULT_PROMPT,
-        help="Prompt to send to the agent once the Azure Advisor MCP server is up.",
+        help="Prompt to send to the agent once the MCP servers are up.",
     )
     parser.add_argument(
         "--model",
