@@ -123,6 +123,13 @@ service principal in the environment):
 python -m advisor_agent.main --prompt "List Azure Advisor recommendations"
 ```
 
+A run can take a minute or more before anything is answered (the first start
+downloads the Azure server, and the model may call several tools). While it
+works, the agent prints progress lines to stderr, each prefixed with
+`[advisor-agent]`: server start, every model turn, every tool call and how
+long it has been running. The answer itself goes to stdout at the end. Pass
+`progress=` to `AdvisorAgent` to send the lines elsewhere or to silence them.
+
 ## Anthropic API with MCP tools
 
 The agent calls the Claude API directly through the `anthropic` Python SDK. Its
