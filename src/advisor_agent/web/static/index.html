@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Azure Advisor</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Azure Advisor</h1>
+    <div id="azure-status" class="status" role="status">
+      <span id="azure-dot" class="dot" aria-hidden="true"></span>
+      <span id="azure-text">Azure: connecting to the server...</span>
+      <button id="azure-retry" type="button" hidden>Retry</button>
+    </div>
+    <div class="spacer"></div>
+    <label class="field">Subscription
+      <select id="subscription"><option value="">Default subscription</option></select>
+    </label>
+    <button id="refresh" type="button">Refresh</button>
+    <span id="connection" class="conn" role="status"></span>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <section id="signin" class="signin" hidden>
+    <h2>Not signed in</h2>
+    <p id="signin-text">Open the address that the server printed in its terminal. It ends in <code>#t=</code> followed by a token.</p>
+  </section>
+
+  <main id="app" hidden>
+    <section class="pane" aria-labelledby="table-title">
+      <div class="pane-head">
+        <h2 id="table-title">Recommendations</h2>
+        <span id="row-count" class="muted"></span>
+      </div>
+      <div class="filters">
+        <label class="field">Category <select id="f-category"><option value="">All</option></select></label>
+        <label class="field">Impact <select id="f-impact"><option value="">All</option></select></label>
+        <label class="field">Status <select id="f-status"><option value="">All</option></select></label>
+        <label class="field">Resource group <select id="f-group"><option value="">All</option></select></label>
+        <label class="field grow">Search <input id="f-text" type="search" maxlength="200" autocomplete="off"></label>
+      </div>
+      <p id="truncated" class="note" hidden></p>
+      <div class="scroll">
+        <table id="table">
+          <thead>
+            <tr id="table-head"></tr>
+          </thead>
+          <tbody id="table-body"></tbody>
+        </table>
+        <p id="table-message" class="muted pad" role="status"></p>
+      </div>
+    </section>
+
+    <div class="side">
+      <section class="pane" aria-labelledby="detail-title">
+        <div class="pane-head"><h2 id="detail-title">Details</h2></div>
+        <div id="detail" class="scroll pad"></div>
+      </section>
+
+      <section class="pane" aria-labelledby="chat-title">
+        <div class="pane-head">
+          <h2 id="chat-title">Chat with the agent</h2>
+          <span class="spacer"></span>
+          <button id="chat-cancel" type="button" disabled>Cancel</button>
+          <button id="chat-reset" type="button" disabled>New conversation</button>
+        </div>
+        <div id="transcript" class="scroll transcript" role="log" aria-live="polite"></div>
+        <div id="progress-box" class="progress-box" hidden>
+          <div class="muted">Working... <span id="run-state"></span></div>
+          <ol id="progress" class="progress"></ol>
+        </div>
+        <p id="chat-note" class="note" role="status" hidden></p>
+        <div class="composer">
+          <textarea id="chat-input" rows="2" maxlength="8000" placeholder="Ask about the recommendations (Enter to send, Shift+Enter for a new line)" aria-label="Message to the agent"></textarea>
+          <button id="chat-send" type="button" disabled>Send</button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="approval-dialog" aria-labelledby="approval-title">
+    <h2 id="approval-title">Approve this Jira action?</h2>
+    <p id="approval-counter" class="muted" hidden></p>
+    <p>The agent wants to call <strong id="approval-tool"></strong>. This can change something in Jira. Check what it will send:</p>
+    <pre id="approval-args" class="args" tabindex="0"></pre>
+    <p id="approval-timer" class="muted"></p>
+    <p id="approval-error" class="error" role="alert" hidden></p>
+    <div class="buttons">
+      <button id="approval-deny" type="button" autofocus>Deny</button>
+      <button id="approval-approve" type="button" class="danger">Approve</button>
+    </div>
+  </dialog>
+</body>
+</html>
