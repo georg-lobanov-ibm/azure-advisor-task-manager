@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import Iterator, List, Optional
 
 
+# How long a statement waits for a lock held by another connection.
+_BUSY_TIMEOUT_SECONDS = 10.0
+
+
 class DatabaseSchemaError(RuntimeError):
     """The database file has a layout this code cannot use."""
 
@@ -140,13 +144,19 @@ class AdvisorDatabase:
                 DatabaseSchema.CREATE_TABLES_SQL
                 + f"\nPRAGMA user_version = {int(DatabaseSchema.SCHEMA_VERSION)};"
             )
+            # Only after the version check, so a refused file is left untouched.
+            # WAL is stored in the file; the web server's two threads (the UI
+            # loop and the agent loop) both write, and readers must not block them.
+            conn.execute("PRAGMA journal_mode = WAL")
         finally:
             conn.close()
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         """A connection that commits on success, rolls back on error and is always closed."""
-        conn = sqlite3.connect(self.db_path)
+        # `timeout` is SQLite's busy timeout: wait for another writer instead of
+        # failing at once with "database is locked".
+        conn = sqlite3.connect(self.db_path, timeout=_BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row  # Access columns by name
         try:
             with conn:  # commit, or roll back if the block raised

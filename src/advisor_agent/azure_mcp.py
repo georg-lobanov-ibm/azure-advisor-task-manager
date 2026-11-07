@@ -20,15 +20,33 @@ npm (``npx``).
 The version is pinned so a new release is never picked up unreviewed; bump
 ``AZURE_MCP_VERSION`` deliberately and re-check the tool list.
 
+What the server exposes
+-----------------------
 Microsoft's command reference marks ``advisor recommendation update`` as a
-write operation, so ``--read-only`` is expected to be what keeps it out of
-the tool list. Do not drop the flag.
+write operation. A probe of version 3.0.0 (started with the command built
+below) found:
+
+* Four tools: the ``advisor`` router, ``group_list``, ``group_resource_list``
+  and ``subscription_list``.
+* The router takes ``intent`` (required), ``command``, ``parameters`` and
+  ``learn``. With ``learn=true`` it lists five commands, none of which writes:
+  ``advisor_recommendation_list``, ``advisor_recommendation_summary``,
+  ``advisor_metadata_list``, ``advisor_metadata_get`` and
+  ``advisor_remediation_get``.
+
+The probe did not start the server without ``--read-only``, so it is not proven
+that the flag is what keeps the update command out of that list. Keep the flag
+anyway, and look at the list again whenever ``AZURE_MCP_VERSION`` changes.
+
+Starting the server with ``--tool <name>`` (one flat tool per command) did not
+work in 3.0.0: it never answered ``initialize``. Namespace mode does, in about
+a second and a half, so the router is how recommendations are listed.
 
 Approval gating
 ----------------
 Unlike the Jira MCP server (see ``jira_mcp.py``), there is no approval gate
-here: every tool this server exposes is read-only, so none of them needs a
-human in the loop.
+here: every tool this server exposes is read-only as far as the probe could
+tell (see above), so none of them needs a human in the loop.
 
 Credentials
 -----------
@@ -60,6 +78,12 @@ from .mcp_tools import McpServerConfig, forward_env
 AZURE_ADVISOR_SERVER_NAME = "azure_advisor"
 
 AZURE_ADVISOR_NAMESPACE = "advisor"
+
+# The tools and router command that code outside the agent calls directly
+# (see web/azure_direct.py). Seen in the tool list of the pinned version below.
+AZURE_ADVISOR_ROUTER_TOOL = "advisor"
+AZURE_ADVISOR_LIST_COMMAND = "advisor_recommendation_list"
+AZURE_SUBSCRIPTION_LIST_TOOL = "subscription_list"
 
 # PyPI package that ships the server, and the exact version that was checked
 # (the 3.0.0 `azmcp server start --help` lists --namespace and --read-only).
@@ -102,8 +126,9 @@ def azure_advisor_server_config() -> McpServerConfig:
             ],
             env=env,
         ),
-        # `--read-only` is meant to remove the write tools, so what is left
-        # needs no human in the loop. Confirm against the real tool list.
+        # The tool list and the router's command list of the pinned version
+        # contain no write command (see the module docstring), so nothing
+        # here needs a human in the loop. Re-check when the version changes.
         requires_approval=lambda tool_name: False,
         install_hint="Install uv (it provides uvx) and make sure it is on PATH.",
     )
