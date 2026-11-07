@@ -34,6 +34,20 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "Advisor Web UI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "advisor_agent.web",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "preLaunchTask": "Setup virtualenv and install dependencies",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "Example: agent_sdk_demo",
             "type": "debugpy",
             "request": "launch",

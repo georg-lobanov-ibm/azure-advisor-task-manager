@@ -125,7 +125,20 @@ src/advisor_agent/
 ├── policy.py               # Decision rules and thresholds
 ├── approval.py             # Approval UI
 ├── database.py             # SQLite: Advisor finding ↔ Jira issue mappings and the audit log
-└── audit.py                # JSONL audit logging (TODO)
+├── audit.py                # JSONL audit logging (TODO)
+└── web/                    # The local web UI (see "Web UI" below)
+    ├── __main__.py         #   python -m advisor_agent.web: arguments, address with token, shutdown
+    ├── app.py              #   Starlette routes and the order the parts start and stop in
+    ├── security.py         #   Host / Origin / cookie checks and the security headers
+    ├── azure_direct.py     #   the server's own connection to the Azure MCP server (the table)
+    ├── recommendations.py  #   checks the filters, turns Advisor records into table rows
+    ├── chat.py             #   one chat run at a time, on a thread of its own
+    ├── approvals.py        #   Jira write approvals: the browser's "yes" or "no"
+    ├── events.py           #   server-sent events to the open page
+    ├── storage.py          #   the database, used from one thread
+    ├── settings.py         #   one run's settings; the Jira key and URL checks
+    ├── errors.py           #   errors that are safe to show in the browser
+    └── static/             #   index.html, app.js, app.css (no build step)
 
 examples/
 ├── agent_sdk_demo.py       # Agent usage examples (file name kept; launch.json refers to it)
@@ -164,6 +177,80 @@ works, the agent prints progress lines to stderr, each prefixed with
 long it has been running. The answer itself goes to stdout at the end. Pass
 `progress=` to `AdvisorAgent` to send the lines elsewhere or to silence them.
 
+## Web UI
+
+A local web page for the same agent: a table of the Advisor recommendations, the
+Jira issue each one is linked to, a chat with the agent, and approval of Jira
+writes in the browser. It is a server that keeps running; it is not a one-off
+HTML export.
+
+```bash
+python -m advisor_agent.web            # or: --port 9000 --model claude-sonnet-5-5
+```
+
+In VS Code, use the "Advisor Web UI" launch configuration. The server prints an
+address such as
+
+```
+http://127.0.0.1:8765/#t=<random token>
+```
+
+Open exactly that address. The token after `#t=` signs the browser in (it is
+exchanged for a cookie and removed from the address bar). The port must be free;
+if it is taken the server says so and ends. Stop it with Ctrl-C.
+
+**What to expect**
+
+* The page opens at once. The first start of the Azure MCP server can take about
+  a minute while `uvx` downloads it; the top bar says "starting" until then, and
+  "failed" with a Retry button if it cannot start.
+* Two Azure MCP server processes run: the web server's own, which fills the
+  table directly with no model call, and the chat agent's, which starts on the
+  first chat message. Chat is switched off (the table still works) when
+  `ANTHROPIC_API_KEY` is missing.
+* The table shows up to 100 recommendations per query (the Azure tool's limit).
+  Narrow the query with the status, category, impact and subscription filters;
+  text search, resource group and sorting work on what was fetched. Answers are
+  kept for 30 seconds; Refresh asks Azure again.
+* **Link / Unlink** ties a recommendation to a Jira issue key you type, for
+  example `ABC-123`. The link is kept in `workspace/advisor.db` under the
+  recommendation type and resource (see "The mapping database"), and every
+  change is written to the audit log. The key is not looked up in Jira. If
+  `JIRA_URL` is set, the key becomes a link to the issue.
+* A Jira write the agent wants to make appears as a dialog with the tool and its
+  arguments. Nothing is sent to Jira until you click Approve. The call is denied
+  if you click Deny, if five minutes pass, if no page has been open for 30
+  seconds, if the server is stopping, or if the decision cannot be written to the
+  audit log (`jira_tool_approval` rows, with a hash of the arguments).
+* Closing and reopening the page loses nothing: the chat, the progress lines and
+  waiting approvals are sent again when it reconnects.
+
+**Security**
+
+The server holds your Azure sign-in and can approve Jira writes, and some of
+what it shows (Advisor text, model answers) comes from outside. So:
+
+* It listens on `127.0.0.1` only. There is no option for another address.
+* Other users and programs on the machine need the launch token. Requests must
+  carry a matching `Host` and `Origin`, a JSON content type for changes, and the
+  session cookie (`HttpOnly`, `SameSite=Strict`). Anything else is refused.
+* The page is built with `textContent`, never `innerHTML`. A content security
+  policy allows only the server's own scripts and styles. Model answers are shown
+  as plain text. Jira links come only from the checked key and `JIRA_URL`.
+* Errors shown in the browser are short; the detail goes to the terminal.
+
+Anyone who can read the printed address (for example on a shared screen or in a
+copied log) can use the server while it runs.
+
+**Tests**
+
+`python -m pytest` also covers the web UI. Besides the usual requests against the
+app, `tests/test_web_lifecycle.py` starts the real server in a process of its
+own, with fake Azure and Jira servers and a scripted model, presses Ctrl-C while
+a chat run, a waiting approval and an open page exist, and checks that it ends
+within 15 seconds and leaves no child process behind. No network access is
+needed.
+
 ## Anthropic API with MCP tools
 
 The agent calls the Claude API directly through the `anthropic` Python SDK. Its
@@ -175,7 +262,7 @@ settings in `~/.claude/settings.json` have no effect on it.
 ✅ **Agent loop**: Claude decides when to call tools; the tool runner executes them and feeds the results back until Claude is done (at most 25 model turns per query)
 ✅ **MCP tools only**: Azure Advisor (`azure_mcp.py`) and, if configured, Jira (`jira_mcp.py`); `agent.py` composes both. The model has no file, shell or web tools
 ✅ **Sessions**: `AdvisorAgent` starts the MCP servers on the first query and keeps them, and the conversation, for its lifetime. A follow-up `query()` sees earlier answers; `reset_conversation()` forgets them
-✅ **Approval gates**: Azure Advisor tools are read-only and run freely. Of the Jira tools only `jira_search`, `jira_get_issue` and `jira_get_transitions` run freely; every other Jira tool, including any the agent doesn't know about, asks for approval on the terminal for each call and is not sent to the server without a "yes" (`mcp_tools.py`, `jira_mcp.py`)
+✅ **Approval gates**: Azure Advisor tools run freely: the server is started with `--read-only`, and the commands its `advisor` tool lists (checked for version 3.0.0) all read. Of the Jira tools only `jira_search`, `jira_get_issue` and `jira_get_transitions` run freely; every other Jira tool, including any the agent doesn't know about, asks for approval for each call and is not sent to the server without a "yes". The command line asks on the terminal, the web UI in the browser (`mcp_tools.py`, `jira_mcp.py`)
 ✅ **Fails closed**: if stdin or stderr is not a terminal (a scheduled run, CI), approval-gated calls are denied, and the model is told so
 ✅ **Audit Trail**: Structured logging and decision tracking
 

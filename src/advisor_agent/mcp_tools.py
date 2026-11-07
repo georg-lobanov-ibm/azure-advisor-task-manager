@@ -246,19 +246,20 @@ async def _read_line_on_daemon_thread() -> str:
     return await future
 
 
-async def start_mcp_server(
+async def open_mcp_session(
     stack: AsyncExitStack,
     config: McpServerConfig,
-    approve: ApprovalCallback,
     *,
     startup_timeout: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
-) -> list[McpTool]:
-    """Start ``config``'s server, keep it alive on ``stack`` and return its tools.
+) -> tuple[ClientSession, list[Any]]:
+    """Start ``config``'s server on ``stack``; return its session and raw MCP tools.
 
     ``stack`` must be entered and closed in the same asyncio task: the
     transport and session use task groups that cannot be left from a
-    different task (``AdvisorAgent`` runs one owner task for exactly this).
-    Raises ``McpServerStartError`` with a readable message on failure.
+    different task (``AdvisorAgent`` and the web server's ``AzureDirect`` each
+    run one owner task for exactly this). Raises ``McpServerStartError`` with
+    a readable message on failure; whatever was opened stays on ``stack`` and
+    is closed when the caller leaves it.
     """
     try:
         read, write = await stack.enter_async_context(
@@ -283,6 +284,22 @@ async def start_mcp_server(
         raise McpServerStartError(
             f"MCP server '{config.name}' failed to start: {type(exc).__name__}: {exc}"
         ) from exc
+    return session, mcp_tools
+
+
+async def start_mcp_server(
+    stack: AsyncExitStack,
+    config: McpServerConfig,
+    approve: ApprovalCallback,
+    *,
+    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
+) -> list[McpTool]:
+    """Start ``config``'s server, keep it alive on ``stack`` and return its tools.
+
+    Same rules as ``open_mcp_session``, which does the work; this adds the
+    runner-ready wrapping and the approval gate.
+    """
+    session, mcp_tools = await open_mcp_session(stack, config, startup_timeout=startup_timeout)
 
     tools: list[McpTool] = []
     for mcp_tool in mcp_tools:

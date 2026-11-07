@@ -70,6 +70,21 @@ closes them (their task groups must be exited by the task that entered them).
 Call ``AdvisorAgent.close()`` (or use the instance as a context manager,
 ``with AdvisorAgent(...) as agent:``) when done, to stop the MCP servers and
 the background thread.
+
+Cancelling
+----------
+``cancel_query()`` may be called from any thread. It stops the query that is
+running, or the server start that the query is waiting for, and that
+``query()`` call raises ``QueryCancelledError``. A cancelled query is still
+recorded in the conversation: the prompt, the tool calls that finished, and a
+fixed note saying that the user cancelled and that calls already made may have
+taken effect, so the model does not assume that an interrupted Jira write did
+not happen. A tool call that was still running has no result and is named in
+that note instead; an unanswered ``tool_use`` is never kept, because the API
+rejects a history that has one.
+
+``close()`` cancels first, then waits for the query to unwind (up to 30 s),
+then stops the servers and the thread.
 """
 
 from __future__ import annotations
@@ -115,6 +130,13 @@ _SHUTDOWN_TIMEOUT_SECONDS = 30.0
 # Receives one human-readable progress line at a time (see "Progress output").
 ProgressCallback = Callable[[str], None]
 
+# How many in-flight tool names the cancel note lists.
+_MAX_NAMES_IN_CANCEL_NOTE = 10
+
+
+class QueryCancelledError(RuntimeError):
+    """``query()`` was ended by ``cancel_query()`` (or by ``close()``)."""
+
 
 def print_progress(message: str) -> None:
     """Default progress sink: one line on stderr, so stdout stays the answer."""
@@ -136,6 +158,53 @@ def _count_errors(tool_results: Any) -> int:
     if not isinstance(content, list):
         return 0
     return sum(1 for item in content if isinstance(item, dict) and item.get("is_error"))
+
+
+def _block_field(block: Any, field: str) -> Any:
+    """``block[field]`` for a dict block, ``block.field`` for an SDK object."""
+    if isinstance(block, dict):
+        return block.get(field)
+    return getattr(block, field, None)
+
+
+def _history_after_cancel(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The conversation to keep when a query was cancelled part-way.
+
+    ``messages`` ends either on a user turn (the prompt or tool results) or on
+    an assistant turn whose tool calls were still running. The latter is cut
+    off: the API rejects a ``tool_use`` without its ``tool_result``. A fixed
+    assistant note is added so the model knows the request was cancelled and
+    that calls it made may have taken effect, which matters for Jira writes.
+    """
+    kept = list(messages)
+    pending: list[str] = []
+    if kept and kept[-1].get("role") == "assistant":
+        content = kept[-1].get("content")
+        if isinstance(content, list):
+            pending = [
+                str(_block_field(block, "name"))
+                for block in content
+                if _block_field(block, "type") == "tool_use"
+            ]
+        if pending:
+            kept.pop()
+        else:
+            return kept  # a finished answer: nothing is waiting on a result
+
+    note = (
+        "[The user cancelled this request before it finished. Tool calls made "
+        "earlier in it may have taken effect."
+    )
+    if pending:
+        shown = ", ".join(_escape(name) for name in pending[:_MAX_NAMES_IN_CANCEL_NOTE])
+        more = len(pending) - _MAX_NAMES_IN_CANCEL_NOTE
+        note += (
+            " These tool calls were requested but have no result, and whether they "
+            f"ran is unknown: {shown}" + (f" and {more} more" if more > 0 else "") + "."
+        )
+    note += "]"
+    kept.append({"role": "assistant", "content": note})
+    return kept
 
 
 def build_server_configs() -> list[McpServerConfig]:
@@ -236,8 +305,22 @@ class AdvisorAgent:
         self._loop_thread.start()
         self._owner: concurrent.futures.Future[None] | None = None
         self._stop: asyncio.Event | None = None
+        # Loop-thread state that cancel_query() reaches through the loop: the
+        # task running the current _aquery, and the owner task while it is still
+        # opening connections (None once they are open).
+        self._query_task: asyncio.Task[Any] | None = None
+        self._starting_task: asyncio.Task[Any] | None = None
+        # The cancel count each of them saw when it began (see _cancel_on_loop).
+        self._query_began_at = 0
+        self._starting_began_at = 0
         self._connected = False
         self._closed = False
+        # Counts cancel_query() calls. query() notes the value once it holds
+        # the lock, and the coroutines it starts compare against it in their
+        # first step, so a cancel that arrives before they have registered
+        # their task (and so before _cancel_on_loop can find it) is not lost.
+        self._cancel_count = 0
+        self._cancel_count_lock = threading.Lock()
         # Serializes query() calls on the shared connections and history if
         # query() is ever called from multiple threads.
         self._query_lock = threading.Lock()
@@ -302,6 +385,10 @@ When working with Advisor findings:
         Returns:
             The agent's final answer: the text of its last response, or all
             text it produced if the last response had none.
+
+        Raises:
+            QueryCancelledError: ``cancel_query()`` or ``close()`` ended it.
+            RuntimeError: The agent is closed.
         """
         # Build context if provided
         context_str = ""
@@ -313,8 +400,43 @@ When working with Advisor findings:
         with self._query_lock:
             if self._closed:
                 raise RuntimeError("AdvisorAgent is closed")
-            self._ensure_connected()
-            return self._run_coroutine(self._aquery(full_prompt))
+            # A cancel that arrived before this point was meant for an earlier
+            # query, which has ended.
+            seen = self._cancel_count
+            try:
+                self._ensure_connected(seen)
+            except concurrent.futures.CancelledError as exc:
+                raise QueryCancelledError("Cancelled while the MCP servers were starting.") from exc
+            return self._run_coroutine(self._aquery(full_prompt, seen))
+
+    def cancel_query(self) -> None:
+        """Cancel the running ``query()``, if any. Safe to call from any thread.
+
+        Returns at once; the cancelled ``query()`` raises ``QueryCancelledError``
+        when it has unwound (see "Cancelling" in the module docstring). Does
+        nothing when no query is running, and never touches the MCP
+        connections of an idle agent.
+        """
+        with self._cancel_count_lock:
+            self._cancel_count += 1
+            issued = self._cancel_count
+        try:
+            self._loop.call_soon_threadsafe(self._cancel_on_loop, issued)
+        except RuntimeError:
+            pass  # the loop is already closed: nothing can be running
+
+    def _cancel_on_loop(self, issued: int) -> None:
+        """Cancel the tasks that began before cancel number ``issued`` was made.
+
+        A task that began later belongs to a newer query, which this cancel was
+        not meant for (it may be delivered after that query has started).
+        """
+        for task, began_at in (
+            (self._query_task, self._query_began_at),
+            (self._starting_task, self._starting_began_at),
+        ):
+            if task is not None and not task.done() and began_at < issued:
+                task.cancel()
 
     def reset_conversation(self) -> None:
         """Forget the conversation so far. The MCP connections stay open."""
@@ -326,19 +448,29 @@ When working with Advisor findings:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return future.result()
+        except concurrent.futures.CancelledError as exc:
+            # The task was cancelled on the loop (cancel_query or close), and
+            # has finished unwinding: the future is only settled after that.
+            raise QueryCancelledError("The query was cancelled.") from exc
         except BaseException:
             # Ctrl-C while waiting: stop the work instead of leaving it
             # running in the background. A no-op if it already finished.
             future.cancel()
             raise
 
-    def _ensure_connected(self) -> None:
+    def _ensure_connected(self, seen_cancels: int) -> None:
         """Start the MCP servers on first use, if not already connected."""
         if self._connected:
             return
 
         ready: concurrent.futures.Future[None] = concurrent.futures.Future()
-        owner = asyncio.run_coroutine_threadsafe(self._own_connections(ready), self._loop)
+        owner = asyncio.run_coroutine_threadsafe(
+            self._own_connections(ready, seen_cancels), self._loop
+        )
+        # A task cancelled before its first step never runs its `finally`, so
+        # `ready` would stay pending for ever. Settling it when the owner ends
+        # is a no-op if it was already settled.
+        owner.add_done_callback(lambda _done: ready.cancel())
         try:
             ready.result()
         except Exception:
@@ -365,7 +497,9 @@ When working with Advisor findings:
         except BaseException:
             pass  # already reported through `ready` or the warning in _own_connections
 
-    async def _own_connections(self, ready: concurrent.futures.Future[None]) -> None:
+    async def _own_connections(
+        self, ready: concurrent.futures.Future[None], seen_cancels: int
+    ) -> None:
         """Owner task: open every connection, report ready, wait to be stopped, close them.
 
         The transports and sessions use task groups, which must be exited by
@@ -373,14 +507,23 @@ When working with Advisor findings:
         right here, in this one task, through a single exit stack.
         """
         stop = asyncio.Event()
+        # Registered before the first await, so a later cancel_query() finds
+        # it. One that came earlier is caught by the counter check below.
+        self._starting_task = asyncio.current_task()
+        self._starting_began_at = seen_cancels
         try:
+            if self._cancel_count != seen_cancels:
+                raise asyncio.CancelledError  # the finally below settles `ready`
             async with AsyncExitStack() as stack:
                 try:
+                    if self._closed:
+                        raise RuntimeError("AdvisorAgent is closed")
                     await self._open_connections(stack)
                 except Exception as exc:
                     ready.set_exception(exc)
                     return  # leaving the stack closes whatever was opened
                 self._stop = stop
+                self._starting_task = None
                 ready.set_result(None)
                 await stop.wait()
         except Exception as exc:
@@ -389,6 +532,7 @@ When working with Advisor findings:
                 file=sys.stderr,
             )
         finally:
+            self._starting_task = None
             if not ready.done():
                 ready.cancel()
 
@@ -443,7 +587,7 @@ When working with Advisor findings:
         self._client = client
         self._tools = tools
 
-    async def _aquery(self, prompt: str) -> str:
+    async def _aquery(self, prompt: str, seen_cancels: int) -> str:
         """
         Run one prompt through the tool runner and return the answer text.
 
@@ -452,8 +596,19 @@ When working with Advisor findings:
         for tools, and then commits the new messages to ``self._history``.
         """
         assert self._client is not None  # _ensure_connected() runs first
+        # close() may have run since query() looked, and a cancel may have come
+        # before this task was registered below (nothing was sent yet, so the
+        # history stays as it was).
+        if self._closed:
+            raise RuntimeError("AdvisorAgent is closed")
+        if self._cancel_count != seen_cancels:
+            raise asyncio.CancelledError
+        # Registered before the first await, so a later cancel_query() finds it.
+        self._query_task = asyncio.current_task()
+        self._query_began_at = seen_cancels
 
-        # Rebuilt on every call and committed only on success, so a failed
+        # Rebuilt on every call and committed only on success (or, for a
+        # cancel, in the trimmed form from _history_after_cancel), so a failed
         # query leaves the history exactly as it was.
         messages: list[dict[str, Any]] = [*self._history, {"role": "user", "content": prompt}]
 
@@ -505,7 +660,13 @@ When working with Advisor findings:
                         step(f"Turn {turn}: waiting for {self.model}...")
                 else:
                     step(f"Turn {turn}: answer received (stop reason: {message.stop_reason})")
+        except asyncio.CancelledError:
+            # Synchronous on purpose: nothing may interrupt the commit.
+            self._history = _history_after_cancel(messages)
+            step("Cancelled.")
+            raise
         finally:
+            self._query_task = None
             with contextlib.suppress(Exception):
                 await runner.close()
 
@@ -537,20 +698,39 @@ When working with Advisor findings:
         `close()` and `__exit__`). Call this (or use `AdvisorAgent` as a
         context manager) when done with the agent to release the MCP
         subprocesses and the background thread.
+
+        Order matters. A query can hold ``_query_lock`` for as long as the
+        model or a tool call takes (or for ever, if one hangs), so this first
+        refuses new queries, cancels the one that is running, and only then
+        waits for the lock, with a limit. Cancelling also ends a server start
+        that the query is waiting for, which unwinds ``uvx`` instead of
+        leaving it behind.
         """
         if self._closed:
             return
         self._closed = True
+        self.cancel_query()
 
-        if self._connected and self._owner is not None and self._stop is not None:
-            self._loop.call_soon_threadsafe(self._stop.set)
-            self._wait_for_owner(self._owner)
-            self._connected = False
+        got_lock = self._query_lock.acquire(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+        if not got_lock:
+            print(
+                "Warning: a query did not end within "
+                f"{_SHUTDOWN_TIMEOUT_SECONDS:.0f}s of being cancelled; closing anyway.",
+                file=sys.stderr,
+            )
+        try:
+            if self._connected and self._owner is not None and self._stop is not None:
+                self._loop.call_soon_threadsafe(self._stop.set)
+                self._wait_for_owner(self._owner)
+                self._connected = False
 
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._loop_thread.join(timeout=5)
-        if not self._loop_thread.is_alive():
-            self._loop.close()
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join(timeout=5)
+            if not self._loop_thread.is_alive():
+                self._loop.close()
+        finally:
+            if got_lock:
+                self._query_lock.release()
 
     def __enter__(self) -> "AdvisorAgent":
         return self
