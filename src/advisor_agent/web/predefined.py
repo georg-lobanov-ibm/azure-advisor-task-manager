@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .chat import MAX_PROMPT_CHARS
+from .context import CONTEXT_KINDS
 from .errors import clean_line
 
 log = logging.getLogger("advisor_agent.web")
@@ -28,9 +29,11 @@ MAX_TITLE_CHARS = 80
 
 
 def load_predefined_chats(path: Path | None) -> dict[str, Any]:
-    """``{"chats": [{"title", "prompt"}, ...], "problems": [str, ...]}`` for the file at ``path``.
+    """``{"chats": [{"title", "prompt"[, "context"]}, ...], "problems": [str, ...]}`` for the file at ``path``.
 
-    ``None`` (the feature is off) and a missing file give no chats and no problem.
+    ``context`` is present only for a chat that wants the open recommendation
+    attached (see ``context.py``). ``None`` (the feature is off) and a missing
+    file give no chats and no problem.
     """
     if path is None:
         return {"chats": [], "problems": []}
@@ -111,4 +114,14 @@ def _check_entry(entry: Any, number: int, name: str, problems: list[str]) -> dic
     if len(prompt) > MAX_PROMPT_CHARS:
         problems.append(f"{name}: chat {number} has a prompt longer than {MAX_PROMPT_CHARS} characters.")
         return None
-    return {"title": clean_line(title, MAX_TITLE_CHARS), "prompt": prompt}
+
+    chat = {"title": clean_line(title, MAX_TITLE_CHARS), "prompt": prompt}
+    context = entry.get("context")
+    if context is not None:
+        # A misspelt kind is a problem, not an ignored key: the chat would go out without what its prompt refers to.
+        if not isinstance(context, str) or context not in CONTEXT_KINDS:
+            allowed = ", ".join(f'"{kind}"' for kind in CONTEXT_KINDS)
+            problems.append(f"{name}: chat {number} has an unknown context (use {allowed}, or leave it out).")
+            return None
+        chat["context"] = context
+    return chat

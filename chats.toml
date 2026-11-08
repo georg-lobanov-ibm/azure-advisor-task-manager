@@ -8,6 +8,11 @@
 #   title   the name shown in the list (one line, at most 80 characters)
 #   prompt  the text put in the message box (at most 8000 characters; a
 #           """ ... """ block can span several lines)
+#   context optional. context = "recommendation" ticks "Attach the selected
+#           recommendation" when the chat is picked, and the recommendation that
+#           is open in the table is sent with the message when you press Send.
+#           The prompt can then say "the recommendation" or "the context". Send
+#           stays disabled until a recommendation is selected.
 #
 # A chat that is written wrongly is skipped and named under the list in the page;
 # the others still work. The agent asks for your approval in a dialog before any
@@ -18,6 +23,16 @@
 #   [[chat]]
 #   title = "Create a Jira issue for the top Security finding"
 #   prompt = "Find the highest-impact Security recommendation without a Jira issue and create one for it."
+
+[[chat]]
+title = "Create a Jira Story for the selected recommendation"
+context = "recommendation"
+prompt = """
+Read the recommendation from the context and create a Jira Story with Tasks for it.
+The Story describes the issue and the recommendation. Include links to official sources only if the recommendation itself contains them; if it has none, say so and do not invent any.
+The Tasks are 'Assessment', 'Implementation' and 'Validation'.
+First check Jira for an existing issue for this recommendation. Show me the Story and Tasks you plan to create before creating anything.
+"""
 
 [[chat]]
 title = "Open recommendations by category"

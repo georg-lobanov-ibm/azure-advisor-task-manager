@@ -148,3 +148,48 @@ def test_picking_a_predefined_chat_only_fills_the_message_box():
         assert forbidden not in body, forbidden
     # The placeholder (an empty value) must not be read as chat number 0.
     assert "select.value === ''" in body
+
+
+def test_the_page_has_the_attach_checkbox_above_the_message_box():
+    assert 'id="attach-rec"' in HTML and 'id="attach-name"' in HTML
+    assert HTML.index('id="presets-row"') < HTML.index('id="attach-rec"') < HTML.index('id="chat-input"')
+
+
+def test_the_recommendation_is_read_when_sending_not_when_picking():
+    code = strip_comments(JS)
+    pick = re.search(r"function pickPredefined\(\) \{(.*?)\n  \}", code, flags=re.S)
+    send = re.search(r"async function sendChat\(\) \{(.*?)\n  \}", code, flags=re.S)
+
+    assert pick and send
+    # Picking only ticks the box; the row that is open at the moment of Send is what goes along.
+    assert "selectedRow" not in pick.group(1) and "recommendationContext" not in pick.group(1)
+    assert "selectedRow()" in send.group(1) and "recommendationContext(row)" in send.group(1)
+    assert "context" in send.group(1)
+
+
+def test_a_message_that_needs_a_recommendation_cannot_go_out_without_one():
+    code = strip_comments(JS)
+    controls = re.search(r"function renderChatControls\(\) \{(.*?)\n  \}", code, flags=re.S)
+    send = re.search(r"async function sendChat\(\) \{(.*?)\n  \}", code, flags=re.S)
+
+    assert controls and send
+    assert "attachMissing" in controls.group(1) and "chat-send" in controls.group(1)
+    # The Enter key calls sendChat directly, so it has to check as well.
+    assert "attach.checked && !row" in send.group(1)
+
+
+def test_the_attached_label_is_shown_as_text():
+    code = strip_comments(JS)
+    node = re.search(r"function entryNode\(entry\) \{(.*?)\n  \}", code, flags=re.S)
+
+    assert node and "entry.context" in node.group(1) and "innerHTML" not in node.group(1)
+
+
+def test_every_context_field_the_page_sends_is_one_the_server_accepts():
+    from advisor_agent.web.context import _FIELDS
+
+    block = re.search(r"const CONTEXT_FIELDS = \[(.*?)\];", strip_comments(JS), flags=re.S)
+
+    assert block
+    sent = set(re.findall(r"'([a-z_]+)'", block.group(1)))
+    assert sent and sent <= set(_FIELDS)

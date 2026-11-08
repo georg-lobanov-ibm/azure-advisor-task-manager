@@ -454,7 +454,7 @@ async def predefined_chats(request: Request) -> Response:
 
 async def chat_send(request: Request) -> Response:
     body = await read_json(request)
-    result = _services(request).chat.start(body.get("text"), body.get("client_msg_id"))
+    result = _services(request).chat.start(body.get("text"), body.get("client_msg_id"), body.get("context"))
     return _json(result, 202)
 
 

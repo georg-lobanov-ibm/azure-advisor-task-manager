@@ -118,6 +118,29 @@ def test_a_bad_entry_is_skipped_and_named_while_the_others_still_load(tmp_path, 
     assert result["problems"][0].startswith("chats.toml: ")
 
 
+def test_a_chat_can_ask_for_the_recommendation_to_be_attached(tmp_path):
+    text = '[[chat]]\ntitle = "T"\ncontext = "recommendation"\nprompt = "P"\n\n[[chat]]\ntitle = "U"\nprompt = "Q"\n'
+
+    result = load_predefined_chats(write(tmp_path, text))
+
+    assert result["problems"] == []
+    assert result["chats"] == [
+        {"title": "T", "prompt": "P", "context": "recommendation"},
+        {"title": "U", "prompt": "Q"},
+    ]
+
+
+@pytest.mark.parametrize("value", ['"recomendation"', '""', "5", "true", '["recommendation"]'])
+def test_an_unknown_context_skips_the_chat_and_names_it(tmp_path, value):
+    # Ignoring it would send the prompt without what it refers to.
+    text = f'[[chat]]\ntitle = "T"\ncontext = {value}\nprompt = "P"\n\n[[chat]]\ntitle = "Good"\nprompt = "Fine."\n'
+
+    result = load_predefined_chats(write(tmp_path, text))
+
+    assert [chat["title"] for chat in result["chats"]] == ["Good"]
+    assert len(result["problems"]) == 1 and "chat 1 has an unknown context" in result["problems"][0]
+
+
 def test_a_prompt_at_exactly_the_limit_is_accepted(tmp_path):
     result = load_predefined_chats(write(tmp_path, f'[[chat]]\ntitle = "T"\nprompt = "{"x" * MAX_PROMPT_CHARS}"\n'))
 
@@ -203,6 +226,13 @@ def test_the_chats_file_that_ships_with_the_repository_is_usable():
     assert result["problems"] == []
     assert len(result["chats"]) >= 1
     assert all(chat["prompt"] and chat["title"] for chat in result["chats"])
+
+
+def test_the_shipped_story_chat_asks_for_the_recommendation():
+    chats = load_predefined_chats(web_main.CHATS_FILE)["chats"]
+
+    story = [chat for chat in chats if chat.get("context") == "recommendation"]
+    assert story and "Assessment" in story[0]["prompt"] and "Implementation" in story[0]["prompt"]
 
 
 # -- the route -------------------------------------------------------------------------------
