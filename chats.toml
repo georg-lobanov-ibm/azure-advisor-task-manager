@@ -55,3 +55,12 @@ Look at the open High-impact Azure Advisor recommendations and check Jira for an
 Then propose which recommendations need a new Jira issue, with a summary and a priority for each.
 Only propose: do not create or change anything in Jira yet.
 """
+
+[[chat]]
+title = "Plan Jira Story for the currently selected recommendation"
+context = "recommendation"
+prompt = """
+Create a Jira story for the currently selected recommendation in the context. Add acceptance criteria to the story.
+Add Jira tasks to the Jira story e.g. 'Assessment', 'Implementation', 'Validation'.
+Add to the story and the tasks information on this recommendation and links to official docs if appropriate.
+"""
