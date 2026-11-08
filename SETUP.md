@@ -2,7 +2,8 @@
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+ (the web UI reads `chats.toml` with the standard library's
+  `tomllib` and uses `asyncio.timeout`; both arrived in 3.11)
 - pip or poetry
 - `uv` / `uvx` on PATH. It spawns the Azure MCP Server subprocess (the
   `msmcp-azure` package from PyPI, which bundles Microsoft's `azmcp` binary;
@@ -133,12 +134,16 @@ src/advisor_agent/
     ├── azure_direct.py     #   the server's own connection to the Azure MCP server (the table)
     ├── recommendations.py  #   checks the filters, turns Advisor records into table rows
     ├── chat.py             #   one chat run at a time, on a thread of its own
+    ├── context.py          #   checks the recommendation attached to a message, builds its text
     ├── approvals.py        #   Jira write approvals: the browser's "yes" or "no"
     ├── events.py           #   server-sent events to the open page
     ├── storage.py          #   the database, used from one thread
+    ├── predefined.py       #   reads chats.toml for the list of predefined chats
     ├── settings.py         #   one run's settings; the Jira key and URL checks
     ├── errors.py           #   errors that are safe to show in the browser
     └── static/             #   index.html, app.js, app.css (no build step)
+
+chats.toml                  # The predefined chats of the web UI, edited by hand
 
 examples/
 ├── agent_sdk_demo.py       # Agent usage examples (file name kept; launch.json refers to it)
@@ -224,6 +229,73 @@ if it is taken the server says so and ends. Stop it with Ctrl-C.
   audit log (`jira_tool_approval` rows, with a hash of the arguments).
 * Closing and reopening the page loses nothing: the chat, the progress lines and
   waiting approvals are sent again when it reconnects.
+
+**Predefined chats**
+
+The "Predefined chats" list above the message box holds starter prompts. Picking
+one puts its text in the message box; you can edit it, and nothing is sent until
+you press Send. The agent still asks for your approval in the dialog before any
+Jira change.
+
+The list comes from `chats.toml` in the project root. Edit that file, then reload
+the page; the server does not need a restart. Each chat is a `[[chat]]` table
+with a title (the name in the list) and a prompt (the text for the message box):
+
+```toml
+[[chat]]
+title = "High-impact recommendations"
+prompt = """
+List the High-impact Azure Advisor recommendations and what to do about each.
+Do not create or change anything in Jira.
+"""
+```
+
+* A title is one line of at most 80 characters. A prompt has at most 8000
+  characters (the same limit as the message box); a `"""` block can span several
+  lines. At most 50 chats are used. Keys other than `title`, `prompt` and
+  `context` are ignored.
+* A chat that is written wrongly is skipped, and the page names the problem under
+  the list (for example "chats.toml: chat 3 has no prompt."). The other chats
+  still work. If the whole file cannot be read, the list is empty and the page
+  says why.
+* If `chats.toml` does not exist, the list is not shown.
+
+**Attaching the selected recommendation**
+
+A chat can refer to the recommendation that is open in the table. Give it
+`context = "recommendation"`:
+
+```toml
+[[chat]]
+title = "Create a Jira Story for the selected recommendation"
+context = "recommendation"
+prompt = """
+Read the recommendation from the context and create a Jira Story with Tasks for it.
+"""
+```
+
+* Picking such a chat ticks "Attach the selected recommendation" above the
+  message box. You can untick it, or tick it for any other message.
+* The recommendation is read when you press **Send**, not when you pick the chat,
+  so you can still change the selection after picking. The agent receives the
+  recommendation's fields (type, resource, category, impact, problem, solution,
+  the linked Jira key and so on) and the record as Azure returned it, followed by
+  your message. The transcript shows only a short line,
+  "Attached recommendation: ...", not the data.
+* With the box ticked and no recommendation selected, Send stays disabled and the
+  page says why. After a message is sent, the box is unticked.
+* The recommendation is data from Azure Advisor, and the agent is told not to
+  follow instructions written inside it. Every Jira change still waits for your
+  approval in the dialog.
+* The agent has no web access. A prompt that asks for "links to official sources"
+  can only get them from the recommendation itself or from the model's memory, so
+  the shipped chat asks for links that appear in the recommendation and says so
+  when there are none.
+* A field is cut at 4000 characters, and the Azure record is left out whole if it
+  is over 20,000 characters. A recommendation that is still too large is refused
+  with a short message.
+* An unknown value for `context` makes the chat count as written wrongly: it is
+  skipped and named under the list.
 
 **Security**
 

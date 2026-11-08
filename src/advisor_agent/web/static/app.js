@@ -14,6 +14,13 @@
   const RECONNECT_MS = 3000;
   const BANNER_MS = 10000;
   const STICK_TO_BOTTOM_PX = 60;
+  // What of the open recommendation goes with a message (the server checks it again).
+  const CONTEXT_FIELDS = [
+    'advisor_id', 'recommendation_type_id', 'resource_id', 'subscription_id', 'resource_group',
+    'resource_name', 'resource_type', 'category', 'impact', 'status', 'problem', 'solution',
+    'description', 'last_updated',
+  ];
+  const MAX_RAW_CONTEXT_CHARS = 20000;
 
   // The filters the server applies (they are sent with the request).
   const CATEGORIES = ['Cost', 'Security', 'Performance', 'OperationalExcellence', 'HighAvailability'];
@@ -57,6 +64,7 @@
     linkError: '',
 
     chat: { enabled: false, reason: null, wedged: false, transcript: [], run: null, progress: [] },
+    predefined: [],
     sending: false,
     pendingMessage: null,
     chatError: '',
@@ -448,6 +456,10 @@
     return row.problem || row.description || row.solution || '(no description)';
   }
 
+  function clip(text, limit) {
+    return text.length <= limit ? text : text.slice(0, limit - 3) + '...';
+  }
+
   function visibleRows() {
     const needle = state.filters.text.trim().toLowerCase();
     const group = state.filters.group;
@@ -587,6 +599,7 @@
   // -- the detail panel and Jira links ------------------------------------------------
 
   function renderDetail() {
+    renderChatControls(); // the "attach" line names the selected recommendation
     const box = $('detail');
     const row = selectedRow();
     if (!row) {
@@ -772,6 +785,10 @@
     const role = entry.role === 'user' || entry.role === 'assistant' || entry.role === 'error' ? entry.role : 'note';
     const node = el('div', { class: 'entry entry-' + role });
     if (ROLE_LABEL[role]) node.append(el('div', { class: 'entry-role', text: ROLE_LABEL[role] }));
+    // The recommendation sent along with a message is shown as a one-line label, not its data.
+    if (role === 'user' && typeof entry.context === 'string' && entry.context) {
+      node.append(el('div', { class: 'entry-context', text: 'Attached recommendation: ' + entry.context }));
+    }
     node.append(el('div', { class: 'entry-text', text: String(entry.text) }));
     return node;
   }
@@ -800,7 +817,14 @@
     const running = chat.run !== null;
     const input = $('chat-input');
     input.disabled = !usable || state.sending;
-    $('chat-send').disabled = !usable || running || state.sending || input.value.trim() === '';
+    $('chat-presets').disabled = input.disabled;
+    const attach = $('attach-rec');
+    attach.disabled = input.disabled;
+    const row = selectedRow();
+    $('attach-name').textContent = row ? '"' + clip(rowTitle(row), 80) + '"' : '(none selected)';
+    // A message that says "the recommendation" must not go out without one.
+    const attachMissing = attach.checked && !row;
+    $('chat-send').disabled = !usable || running || state.sending || input.value.trim() === '' || attachMissing;
     const cancel = $('chat-cancel');
     cancel.disabled = !running || (chat.run && chat.run.state === 'cancelling');
     cancel.textContent = chat.run && chat.run.state === 'cancelling' ? 'Cancelling...' : 'Cancel';
@@ -813,6 +837,8 @@
       note = 'Chat is not available' + (chat.reason ? ': ' + chat.reason : '.');
     } else if (chat.wedged) {
       note = 'The previous run did not stop after a cancel. Restart the server to chat again.';
+    } else if (!note && attachMissing) {
+      note = 'Select a recommendation in the table, or untick "Attach the selected recommendation".';
     }
     const noteBox = $('chat-note');
     noteBox.textContent = note;
@@ -873,21 +899,41 @@
     renderChat();
   }
 
+  // The open recommendation as the server wants it, read now (at Send), not when a chat was picked.
+  // The record as Azure returned it goes along unless it is large: a request has a size limit.
+  function recommendationContext(row) {
+    const context = {};
+    for (const name of CONTEXT_FIELDS) {
+      if (typeof row[name] === 'string' && row[name]) context[name] = row[name];
+    }
+    if (row.link && row.link.jira_key) context.linked_jira_key = row.link.jira_key;
+    if (row.raw && JSON.stringify(row.raw).length <= MAX_RAW_CONTEXT_CHARS) context.raw = row.raw;
+    return context;
+  }
+
   async function sendChat() {
     const input = $('chat-input');
     const text = input.value.trim();
     if (!text || state.sending || state.chat.run) return;
+    const attach = $('attach-rec');
+    const row = attach.checked ? selectedRow() : null;
+    if (attach.checked && !row) return; // the button is disabled then; this is for the Enter key
+    const key = row ? row.row_id : '';
     // A retry of the same text keeps its id, so the server can tell it is the same message.
-    if (!state.pendingMessage || state.pendingMessage.text !== text) {
-      state.pendingMessage = { id: newMessageId(), text };
+    // Another recommendation attached makes it another message.
+    if (!state.pendingMessage || state.pendingMessage.text !== text || state.pendingMessage.key !== key) {
+      state.pendingMessage = { id: newMessageId(), text, key };
     }
+    const body = { text, client_msg_id: state.pendingMessage.id };
+    if (row) body.context = { recommendation: recommendationContext(row) };
     state.sending = true;
     state.chatError = '';
     renderChatControls();
     try {
-      await api('POST', '/api/chat', { text, client_msg_id: state.pendingMessage.id });
+      await api('POST', '/api/chat', body);
       state.pendingMessage = null;
       if (input.value.trim() === text) input.value = '';
+      attach.checked = false; // each message attaches only what it was asked to
     } catch (error) {
       state.chatError = error.message;
     }
@@ -911,6 +957,57 @@
     } catch (error) {
       state.chatError = error.message;
       renderChatControls();
+    }
+  }
+
+  // -- predefined chats -----------------------------------------------------------------
+
+  // The list comes from chats.toml and is fetched on every page load. It only fills
+  // the message box: sending is always a separate click.
+  async function loadPredefined() {
+    let data = null;
+    let failure = '';
+    try {
+      data = await api('GET', '/api/predefined');
+    } catch (error) {
+      failure = 'Could not load predefined chats: ' + error.message;
+    }
+    const chats = data && Array.isArray(data.chats) ? data.chats : [];
+    const problems = data && Array.isArray(data.problems) ? data.problems.map(String) : [];
+    if (failure) problems.push(failure);
+    state.predefined = chats.filter(
+      (chat) => chat && typeof chat.title === 'string' && typeof chat.prompt === 'string',
+    );
+
+    const select = $('chat-presets');
+    select.replaceChildren(
+      el('option', { text: 'Choose a predefined chat...', attrs: { value: '' } }),
+      ...state.predefined.map((chat, index) => el('option', { text: chat.title, attrs: { value: String(index) } })),
+    );
+    // The list is hidden when there is nothing to pick, but problems are always shown.
+    select.parentElement.hidden = state.predefined.length === 0;
+    const note = $('presets-note');
+    note.replaceChildren(...problems.map((problem) => el('div', { text: problem })));
+    note.hidden = problems.length === 0;
+    $('presets-row').hidden = state.predefined.length === 0 && problems.length === 0;
+    renderChatControls();
+  }
+
+  function pickPredefined() {
+    const select = $('chat-presets');
+    const chat = select.value === '' ? null : state.predefined[Number(select.value)];
+    select.value = '';  // back to the placeholder, so the same chat can be picked again
+    if (!chat) return;
+    const input = $('chat-input');
+    input.value = chat.prompt;
+    // A chat that refers to "the recommendation" ticks the box; any other chat clears it.
+    // The box is only ticked here, never sent from here: the context is read at Send.
+    $('attach-rec').checked = chat.context === 'recommendation';
+    // Setting the value from code fires no input event, so the Send button is updated here.
+    renderChatControls();
+    if (!input.disabled) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
     }
   }
 
@@ -1097,6 +1194,8 @@
     $('chat-send').addEventListener('click', sendChat);
     $('chat-cancel').addEventListener('click', cancelChat);
     $('chat-reset').addEventListener('click', resetChat);
+    $('chat-presets').addEventListener('change', pickPredefined);
+    $('attach-rec').addEventListener('change', renderChatControls);
 
     const dialog = $('approval-dialog');
     $('approval-approve').addEventListener('click', () => decideApproval(true));
@@ -1141,6 +1240,7 @@
     }
     showApp();
     connect();
+    loadPredefined();  // not awaited: the page does not wait for the list
   }
 
   boot();

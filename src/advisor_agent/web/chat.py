@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..agent import QueryCancelledError
+from .context import attached_context
 from .errors import ApiError, clean_line, safe_error
 from .events import EventHub
 from .settings import Settings
@@ -99,17 +100,25 @@ class ChatSession:
             "progress": list(self._progress),
         }
 
-    def _entry(self, role: str, text: str) -> dict[str, Any]:
+    def _entry(self, role: str, text: str, context: str | None = None) -> dict[str, Any]:
         self._entry_ids += 1
-        entry = {"id": self._entry_ids, "role": role, "text": text[:MAX_ANSWER_CHARS]}
+        entry: dict[str, Any] = {"id": self._entry_ids, "role": role, "text": text[:MAX_ANSWER_CHARS]}
+        if context:
+            entry["context"] = context  # what was attached, as a short label for the page
         self._transcript.append(entry)
         del self._transcript[:-MAX_TRANSCRIPT_ENTRIES]
         return entry
 
     # -- starting a run ----------------------------------------------------------------
 
-    def start(self, text: Any, client_msg_id: Any) -> dict[str, Any]:
-        """Begin a run for ``text``. Raises ``ApiError`` if that is not possible now."""
+    def start(self, text: Any, client_msg_id: Any, context: Any = None) -> dict[str, Any]:
+        """Begin a run for ``text``. Raises ``ApiError`` if that is not possible now.
+
+        ``context`` is what the page attaches to this message (see ``context.py``).
+        The agent gets it in front of ``text``; the transcript shows ``text`` and
+        a short label for it. Like the text, it is part of this one message and
+        is not kept anywhere else.
+        """
         if not isinstance(client_msg_id, str) or not _MESSAGE_ID.fullmatch(client_msg_id):
             raise ApiError(400, "Missing or invalid message id.")
         # A repeated request (a retry after a lost response) gets the same run back.
@@ -119,6 +128,7 @@ class ChatSession:
             raise ApiError(400, "Write a message first.")
         if len(text) > MAX_PROMPT_CHARS:
             raise ApiError(400, f"The message is too long (at most {MAX_PROMPT_CHARS} characters).")
+        attached = attached_context(context)
         if self._shutdown:
             raise ApiError(503, "The server is shutting down.")
         if self._agent is None:
@@ -136,12 +146,13 @@ class ChatSession:
         self._run = run
         self._last_message = (client_msg_id, run.id)
         self._progress.clear()
-        entry = self._entry("user", text.strip())
+        entry = self._entry("user", text.strip(), context=attached[1] if attached else None)
         self._hub.publish("chat_started", {"run": run.public(), "entry": entry})
 
+        prompt = f"{attached[0]}\n\n{text.strip()}" if attached else text.strip()
         threading.Thread(
             target=self._work,
-            args=(run, self._agent, text.strip()),
+            args=(run, self._agent, prompt),
             name=f"advisor-chat-{run.id}",
             daemon=True,
         ).start()

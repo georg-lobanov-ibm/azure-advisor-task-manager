@@ -33,6 +33,7 @@ from .azure_direct import AzureDirect, AzureUnavailable
 from .chat import AgentFactory, ChatSession
 from .errors import ApiError, clean_line
 from .events import EventHub, Subscription
+from .predefined import load_predefined_chats
 from .recommendations import GUID, link_key
 from .security import MAX_BODY_BYTES, SecurityMiddleware, token_matches
 from .settings import (
@@ -446,9 +447,14 @@ async def delete_link(request: Request) -> Response:
 # -- chat and approvals -----------------------------------------------------------------
 
 
+async def predefined_chats(request: Request) -> Response:
+    """The starter prompts from ``chats.toml``, read on every request so an edit shows on reload."""
+    return _json(load_predefined_chats(_services(request).settings.chats_file))
+
+
 async def chat_send(request: Request) -> Response:
     body = await read_json(request)
-    result = _services(request).chat.start(body.get("text"), body.get("client_msg_id"))
+    result = _services(request).chat.start(body.get("text"), body.get("client_msg_id"), body.get("context"))
     return _json(result, 202)
 
 
@@ -516,6 +522,7 @@ def create_app(
         Route("/api/links", list_links),
         Route("/api/links", put_link, methods=["PUT"]),
         Route("/api/links", delete_link, methods=["DELETE"]),
+        Route("/api/predefined", predefined_chats),
         Route("/api/chat", chat_send, methods=["POST"]),
         Route("/api/chat/cancel", chat_cancel, methods=["POST"]),
         Route("/api/chat/reset", chat_reset, methods=["POST"]),

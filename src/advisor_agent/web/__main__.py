@@ -31,6 +31,7 @@ HOST = "127.0.0.1"  # the only address served; there is deliberately no option f
 DEFAULT_PORT = 8765
 WORKSPACE_DIR = ENV_FILE.parent / "workspace"
 DATABASE_FILE = WORKSPACE_DIR / "advisor.db"
+CHATS_FILE = ENV_FILE.parent / "chats.toml"  # the predefined chats, edited by hand
 GRACEFUL_SHUTDOWN_SECONDS = 10
 
 
@@ -150,6 +151,7 @@ def main(argv: list[str] | None = None) -> None:
         token=secrets.token_urlsafe(24),
         port=args.port,
         jira_base_url=jira_base_url(os.environ.get("JIRA_URL")),
+        chats_file=CHATS_FILE,
     )
     try:
         server = build_server(settings, model=args.model)
