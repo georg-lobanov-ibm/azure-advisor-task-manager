@@ -13,9 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import re
-import sqlite3
 from pathlib import Path
 from typing import Any, AsyncIterator, Mapping
 
@@ -33,6 +31,13 @@ from .azure_direct import AzureDirect, AzureUnavailable
 from .chat import AgentFactory, ChatSession
 from .errors import ApiError, clean_line
 from .events import EventHub, Subscription
+from .links import (
+    LINK_AUDIT_LINK,
+    LINK_FIELD_LIMITS,
+    create_link,
+    public_link,
+    remove_link,
+)
 from .predefined import load_predefined_chats
 from .recommendations import GUID, link_key
 from .security import MAX_BODY_BYTES, SecurityMiddleware, token_matches
@@ -44,8 +49,6 @@ from .settings import (
 )
 from .storage import Storage
 
-log = logging.getLogger("advisor_agent.web")
-
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 # The only files served under /static, with the type each is served as.
 STATIC_FILES = {
@@ -55,9 +58,6 @@ STATIC_FILES = {
 
 _APPROVAL_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-LINK_AUDIT_LINK = "manual_link"
-LINK_AUDIT_UNLINK = "manual_unlink"
 
 
 # -- the pieces, and their life ---------------------------------------------------------
@@ -95,7 +95,12 @@ class Services:
         self.loop = loop
         self.approvals = ApprovalBridge(self.settings, self.storage, self.hub, loop)
         self.chat = ChatSession(
-            self.settings, self.hub, loop, self._agent_factory, self.approvals.callback
+            self.settings,
+            self.hub,
+            loop,
+            self._agent_factory,
+            self.approvals.callback,
+            self.storage,
         )
         self.azure = AzureDirect(
             self._azure_config,
@@ -278,18 +283,6 @@ async def subscriptions(request: Request) -> Response:
     return _json({"subscriptions": await services.azure.list_subscriptions()})
 
 
-def public_link(mapping: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "recommendation_type_id": mapping.get("recommendation_type_id"),
-        "resource_id": mapping.get("resource_id"),
-        "jira_key": mapping.get("jira_issue_key"),
-        "status": mapping.get("status"),
-        "created_at": mapping.get("created_at"),
-        "category": mapping.get("category"),
-        "impact": mapping.get("impact"),
-    }
-
-
 async def recommendations(request: Request) -> Response:
     services = _services(request)
     params = dict(request.query_params)
@@ -325,77 +318,6 @@ async def azure_retry(request: Request) -> Response:
 # -- Jira links -------------------------------------------------------------------------
 
 
-def _create_link(
-    db: AdvisorDatabase,
-    type_id: str,
-    resource_id: str,
-    jira_key: str,
-    advisor_id: str | None,
-    category: str | None,
-    impact: str | None,
-    subscription_id: str | None,
-) -> dict[str, Any]:
-    """Runs on the database thread."""
-    existing = db.get_mapping(type_id, resource_id)
-    if existing is not None:
-        raise ApiError(
-            409, f"This finding is already linked to {existing['jira_issue_key']}. Unlink it first."
-        )
-    if db.get_mapping_by_jira_key(jira_key) is not None:
-        raise ApiError(409, f"{jira_key} is already linked to another finding.")
-    try:
-        mapping = db.create_mapping(
-            type_id,
-            resource_id,
-            jira_key,
-            advisor_id=advisor_id,
-            category=category,
-            impact=impact,
-            subscription_id=subscription_id,
-        )
-    except sqlite3.IntegrityError:
-        raise ApiError(409, "This finding or this Jira issue is already linked.") from None
-    try:
-        db.log_audit(
-            LINK_AUDIT_LINK,
-            advisor_id=advisor_id,
-            jira_key=jira_key,
-            decision="link",
-            rationale="Linked by hand in the web UI",
-            metadata={"source": "web_ui"},
-            recommendation_type_id=type_id,
-            resource_id=resource_id,
-        )
-    except Exception:
-        # A link without its record is not kept.
-        db.delete_mapping(type_id, resource_id)
-        raise
-    return mapping
-
-
-def _remove_link(db: AdvisorDatabase, type_id: str, resource_id: str) -> dict[str, Any]:
-    """Runs on the database thread."""
-    existing = db.get_mapping(type_id, resource_id)
-    if existing is None:
-        raise ApiError(404, "This finding is not linked.")
-    db.delete_mapping(type_id, resource_id)
-    try:
-        db.log_audit(
-            LINK_AUDIT_UNLINK,
-            advisor_id=existing.get("advisor_id"),
-            jira_key=existing["jira_issue_key"],
-            decision="unlink",
-            rationale="Unlinked by hand in the web UI",
-            metadata={"source": "web_ui"},
-            recommendation_type_id=type_id,
-            resource_id=resource_id,
-        )
-    except Exception:
-        log.exception("Could not write the audit record of an unlink.")
-        raise
-    return existing
-
-
 async def list_links(request: Request) -> Response:
     storage = _services(request).storage
     mappings = await storage.run(storage.db.get_all_mappings)
@@ -405,20 +327,23 @@ async def list_links(request: Request) -> Response:
 async def put_link(request: Request) -> Response:
     services = _services(request)
     body = await read_json(request)
-    type_id = _text_field(body, "recommendation_type_id", limit=200, required=True)
-    resource_id = _text_field(body, "resource_id", limit=1024, required=True)
+    limits = LINK_FIELD_LIMITS
+    type_id = _text_field(
+        body, "recommendation_type_id", limit=limits["recommendation_type_id"], required=True
+    )
+    resource_id = _text_field(body, "resource_id", limit=limits["resource_id"], required=True)
     jira_key = _text_field(body, "jira_key", limit=JIRA_KEY_MAX_LENGTH, required=True).upper()
     if not valid_jira_key(jira_key):
         raise ApiError(400, "That is not a Jira issue key (expected something like ABC-123).")
-    category = _text_field(body, "category", limit=100) or None
-    impact = _text_field(body, "impact", limit=100) or None
-    advisor_id = _text_field(body, "advisor_id", limit=200) or None
-    subscription_id = _text_field(body, "subscription_id", limit=36) or None
+    category = _text_field(body, "category", limit=limits["category"]) or None
+    impact = _text_field(body, "impact", limit=limits["impact"]) or None
+    advisor_id = _text_field(body, "advisor_id", limit=limits["advisor_id"]) or None
+    subscription_id = _text_field(body, "subscription_id", limit=limits["subscription_id"]) or None
     if subscription_id is not None and not GUID.fullmatch(subscription_id):
         raise ApiError(400, "'subscription_id' is invalid.")
 
     mapping = await services.storage.run(
-        _create_link,
+        create_link,
         services.storage.db,
         type_id,
         resource_id,
@@ -427,6 +352,9 @@ async def put_link(request: Request) -> Response:
         category,
         impact,
         subscription_id,
+        action=LINK_AUDIT_LINK,
+        rationale="Linked by hand in the web UI",
+        source="web_ui",
     )
     link = public_link(mapping)
     services.hub.publish("link_changed", {"link": link, "removed": False})
@@ -436,9 +364,16 @@ async def put_link(request: Request) -> Response:
 async def delete_link(request: Request) -> Response:
     services = _services(request)
     body = await read_json(request)
-    type_id = _text_field(body, "recommendation_type_id", limit=200, required=True)
-    resource_id = _text_field(body, "resource_id", limit=1024, required=True)
-    removed = await services.storage.run(_remove_link, services.storage.db, type_id, resource_id)
+    type_id = _text_field(
+        body,
+        "recommendation_type_id",
+        limit=LINK_FIELD_LIMITS["recommendation_type_id"],
+        required=True,
+    )
+    resource_id = _text_field(
+        body, "resource_id", limit=LINK_FIELD_LIMITS["resource_id"], required=True
+    )
+    removed = await services.storage.run(remove_link, services.storage.db, type_id, resource_id)
     link = public_link(removed)
     services.hub.publish("link_changed", {"link": link, "removed": True})
     return _json({"removed": True, "link": link})
@@ -496,7 +431,8 @@ def create_app(
     db: AdvisorDatabase,
     azure_options: Mapping[str, Any] | None = None,
 ) -> Starlette:
-    """Build the app. ``agent_factory(approval_callback, progress)`` makes the chat agent.
+    """Build the app. ``agent_factory(approval_callback, progress, on_tool_result)``
+    makes the chat agent.
 
     ``azure_options`` are extra keyword arguments for ``AzureDirect`` (timeouts
     and backoff), for tests.

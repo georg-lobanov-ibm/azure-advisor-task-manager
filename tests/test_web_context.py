@@ -9,9 +9,12 @@ from advisor_agent.web.context import (
     MAX_FIELD_CHARS,
     MAX_LABEL_CHARS,
     MAX_RAW_CHARS,
+    LinkTarget,
     attached_context,
+    link_target,
 )
 from advisor_agent.web.errors import ApiError
+from advisor_agent.web.links import LINK_FIELD_LIMITS
 
 
 def block_of(row, **extra):
@@ -161,3 +164,92 @@ def test_fields_that_cannot_be_written_are_a_400(monkeypatch):
         block_of({"problem": "P"})
 
     assert caught.value.status == 400
+
+
+# -- the finding a Story created for the recommendation is linked to ---------------------------------
+
+SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
+IDENTITY = {"recommendation_type_id": "type-1", "resource_id": "/subscriptions/x/vm-1"}
+
+
+def target_of(**row):
+    return link_target({"recommendation": {**IDENTITY, **row}})
+
+
+def test_the_identity_and_the_optional_fields_are_taken():
+    row = {
+        "advisor_id": "rec-1",
+        "category": "Cost",
+        "impact": "High",
+        "subscription_id": SUBSCRIPTION,
+        "problem": "ignored",
+    }
+
+    assert target_of(**row) == LinkTarget(
+        recommendation_type_id="type-1",
+        resource_id="/subscriptions/x/vm-1",
+        advisor_id="rec-1",
+        category="Cost",
+        impact="High",
+        subscription_id=SUBSCRIPTION,
+    )
+
+
+def test_only_the_identity_is_needed():
+    assert target_of() == LinkTarget("type-1", "/subscriptions/x/vm-1")
+
+
+def test_values_are_stripped():
+    assert target_of(resource_id="  /vm  ", category=" Cost ").resource_id == "/vm"
+    assert target_of(category=" Cost ").category == "Cost"
+
+
+@pytest.mark.parametrize("context", [None, {}, "text", ["a"], 5, {"recommendation": None}, {"recommendation": "x"}, {"recommendation": ["a"]}])
+def test_nothing_attached_gives_no_target(context):
+    assert link_target(context) is None
+
+
+@pytest.mark.parametrize("name", ["recommendation_type_id", "resource_id"])
+@pytest.mark.parametrize("value", [None, "", "   ", 5, ["a"], {"a": 1}, "a\nb", "a\x00b", "a\x7fb", "a\x85b"])
+def test_an_identity_that_is_missing_or_bad_gives_no_target(name, value):
+    assert target_of(**{name: value}) is None
+
+
+@pytest.mark.parametrize("name", ["recommendation_type_id", "resource_id"])
+def test_an_identity_over_its_limit_is_refused_and_not_clipped(name):
+    limit = LINK_FIELD_LIMITS[name]
+
+    assert target_of(**{name: "x" * limit}) is not None
+    assert target_of(**{name: "x" * (limit + 1)}) is None  # a clipped ID would name another resource
+
+
+def test_an_identity_missing_altogether_gives_no_target():
+    assert link_target({"recommendation": {"resource_id": "/vm"}}) is None
+    assert link_target({"recommendation": {"recommendation_type_id": "t"}}) is None
+
+
+@pytest.mark.parametrize("name", ["advisor_id", "category", "impact"])
+def test_an_optional_field_with_a_bad_value_is_left_out(name):
+    for value in (5, "", "a\nb", "x" * (LINK_FIELD_LIMITS[name] + 1)):
+        target = target_of(**{name: value})
+
+        assert target is not None and getattr(target, name) is None
+
+
+@pytest.mark.parametrize("value", ["not-a-guid", SUBSCRIPTION + "0", "../../etc", 5, ""])
+def test_a_subscription_id_that_is_not_a_guid_is_dropped(value):
+    target = target_of(subscription_id=value)
+
+    assert target is not None and target.subscription_id is None
+
+
+def test_the_link_the_page_claims_is_ignored():
+    assert target_of(linked_jira_key="ABC-1") == LinkTarget("type-1", "/subscriptions/x/vm-1")
+
+
+def test_an_identity_the_prompt_carries_whole_can_still_be_too_long_to_link():
+    resource_id = "/r" * 750  # within what the prompt keeps, over what a link accepts
+
+    assert LINK_FIELD_LIMITS["resource_id"] < len(resource_id) <= MAX_FIELD_CHARS
+    assert resource_id in block_of(IDENTITY, resource_id=resource_id)[0]
+    assert target_of(resource_id=resource_id) is None

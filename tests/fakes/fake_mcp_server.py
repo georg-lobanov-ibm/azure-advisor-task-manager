@@ -22,6 +22,12 @@ every failure the tests need:
 ``FAKE_MCP_RECOMMENDATIONS``
     Path of a JSON file whose content is the list returned by
     ``advisor_recommendation_list`` (default: two fixed recommendations).
+``FAKE_JIRA_CREATE_GARBLED``
+    ``jira_create_issue`` answers with text that is not JSON.
+
+``jira_create_issue`` answers like mcp-atlassian: ``{"message": "Issue created
+successfully", "issue": {"key": "TEST-<n>", ...}}``, with ``n`` counting up from 1
+for each process.
 """
 
 import json
@@ -152,12 +158,31 @@ def build_server(kind: str) -> MCPServer:
             _maybe_hang()
             return json.dumps({"issues": []})
 
+        created = {"n": 0}
+
         @server.tool()
-        def jira_create_issue(project_key: str, summary: str) -> str:
+        def jira_create_issue(
+            project_key: str, summary: str, issue_type: str = "Task", description: str = ""
+        ) -> str:
             """Create an issue (a write tool: needs approval)."""
-            _log_call("jira_create_issue", {"project_key": project_key, "summary": summary})
+            _log_call(
+                "jira_create_issue",
+                {"project_key": project_key, "summary": summary, "issue_type": issue_type},
+            )
             _maybe_hang()
-            return json.dumps({"key": "TEST-1"})
+            created["n"] += 1
+            if os.environ.get("FAKE_JIRA_CREATE_GARBLED"):
+                return "Issue created, but this is not JSON."
+            return json.dumps(
+                {
+                    "message": "Issue created successfully",
+                    "issue": {
+                        "key": f"TEST-{created['n']}",
+                        "summary": summary,
+                        "issue_type": {"name": issue_type},
+                    },
+                }
+            )
 
     else:
         raise SystemExit(f"unknown kind {kind!r}; use 'azure' or 'jira'")

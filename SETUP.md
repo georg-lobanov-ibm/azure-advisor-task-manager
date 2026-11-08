@@ -135,6 +135,7 @@ src/advisor_agent/
     ├── recommendations.py  #   checks the filters, turns Advisor records into table rows
     ├── chat.py             #   one chat run at a time, on a thread of its own
     ├── context.py          #   checks the recommendation attached to a message, builds its text
+    ├── links.py            #   the link between a finding and a Jira issue: create, remove, what the page sees
     ├── approvals.py        #   Jira write approvals: the browser's "yes" or "no"
     ├── events.py           #   server-sent events to the open page
     ├── storage.py          #   the database, used from one thread
@@ -222,6 +223,20 @@ if it is taken the server says so and ends. Stop it with Ctrl-C.
   recommendation type and resource (see "The mapping database"), and every
   change is written to the audit log. The key is not looked up in Jira. If
   `JIRA_URL` is set, the key becomes a link to the issue.
+* **A Story the agent creates is linked for you** when a recommendation is
+  attached to the message and you approve a `jira_create_issue` call whose issue
+  type is `Story`. The key comes from Jira's answer to that call. The audit log
+  gets an `auto_link` row (the Link button writes `manual_link`), and the
+  transcript says "Linked ABC-123 to the attached recommendation."
+  * Only the first Story of a message is linked; a note names any other.
+  * A recommendation that is already linked keeps its link, and a note says that
+    the new Story was not linked. The same goes for a key that is linked to
+    another recommendation. Unlink first if you want to replace a link.
+  * Tasks and sub-tasks are never linked, and neither is a Story created without
+    an attached recommendation. The issue type must be named `Story` in the call.
+  * If the key cannot be read from Jira's answer, or the link cannot be written,
+    the Story still exists and a note asks you to link it by hand.
+  * Only the web UI does this; `python -m advisor_agent.main` (the CLI) does not link.
 * A Jira write the agent wants to make appears as a dialog with the tool and its
   arguments. Nothing is sent to Jira until you click Approve. The call is denied
   if you click Deny, if five minutes pass, if no page has been open for 30
@@ -287,6 +302,10 @@ Read the recommendation from the context and create a Jira Story with Tasks for 
 * The recommendation is data from Azure Advisor, and the agent is told not to
   follow instructions written inside it. Every Jira change still waits for your
   approval in the dialog.
+* The attached recommendation is also the finding that a Story created in that
+  message is linked to (see "Link / Unlink" above). The server takes the type ID
+  and resource ID from the attachment, and does not clip them: an ID that is too
+  long means no link, and a note says so.
 * The agent has no web access. A prompt that asks for "links to official sources"
   can only get them from the recommendation itself or from the model's memory, so
   the shipped chat asks for links that appear in the recommendation and says so

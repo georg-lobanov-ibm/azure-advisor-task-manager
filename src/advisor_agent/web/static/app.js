@@ -252,6 +252,7 @@
       chat_started: onChatStarted,
       chat_progress: onChatProgress,
       chat_finished: onChatFinished,
+      chat_entry: onChatEntry,
       chat_state: onChatState,
       chat_reset: onChatReset,
       approval_requested: onApprovalRequested,
@@ -883,6 +884,10 @@
     state.chat.wedged = false;
     addEntry(data.entry);
     renderChatControls();
+  }
+
+  function onChatEntry(data) {
+    addEntry(data.entry);
   }
 
   function onChatState(data) {

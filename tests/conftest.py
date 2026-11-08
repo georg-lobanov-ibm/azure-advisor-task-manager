@@ -92,7 +92,7 @@ def web(tmp_path, fake_server):
     """
     from fakes.web_harness import running_web
 
-    def disabled_chat(approval_callback, progress):
+    def disabled_chat(approval_callback, progress, on_tool_result):
         raise ValueError("chat is off in this test")
 
     def start(*, agent_factory=disabled_chat, azure=None, **kwargs):

@@ -17,6 +17,11 @@ literal ``True`` the server is never called and the model gets an error result
 telling it the call was denied. The gate lives in the tool object itself, so
 it applies to every path the runner can take to the tool.
 
+A gated tool can also be given a ``ToolResultObserver``. It is told about each
+call that was approved and that the server answered without an error, with the
+answer, so the caller can act on what was written (the web UI links a Story it
+created to the recommendation it was created for).
+
 Environment of the server subprocesses
 --------------------------------------
 ``mcp``'s ``stdio_client`` starts the server with only a handful of variables
@@ -104,6 +109,11 @@ class ApprovalRequest:
 
 ApprovalCallback = Callable[[ApprovalRequest], Awaitable[bool]]
 
+# Called with an approved request and the tool's result, after the call
+# succeeded. It runs on the agent's event loop, so it must return quickly; an
+# exception it raises is reported and does not change the result.
+ToolResultObserver = Callable[[ApprovalRequest, Any], None]
+
 
 @dataclass(frozen=True)
 class McpTool:
@@ -138,10 +148,12 @@ class ApprovalGatedTool(BetaAsyncBuiltinFunctionTool):
         *,
         server: str,
         approve: ApprovalCallback,
+        observe: ToolResultObserver | None = None,
     ) -> None:
         self._inner = inner
         self.server = server
         self._approve = approve
+        self._observe = observe
 
     def to_dict(self) -> Any:
         return self._inner.to_dict()
@@ -163,7 +175,18 @@ class ApprovalGatedTool(BetaAsyncBuiltinFunctionTool):
         if approved is not True:
             raise ToolError("Denied by human reviewer. The call was not made; do not retry it.")
 
-        return await self._inner.call(input)
+        result = await self._inner.call(input)
+        if self._observe is not None:
+            try:
+                self._observe(request, result)
+            except Exception as exc:
+                # The call has happened; what the observer does with it must not undo that.
+                print(
+                    f"Warning: handling the result of {self.server}:{self.name} failed: "
+                    f"{type(exc).__name__}",
+                    file=sys.stderr,
+                )
+        return result
 
 
 def _server_errlog() -> TextIO:
@@ -292,12 +315,14 @@ async def start_mcp_server(
     config: McpServerConfig,
     approve: ApprovalCallback,
     *,
+    observe: ToolResultObserver | None = None,
     startup_timeout: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
 ) -> list[McpTool]:
     """Start ``config``'s server, keep it alive on ``stack`` and return its tools.
 
     Same rules as ``open_mcp_session``, which does the work; this adds the
-    runner-ready wrapping and the approval gate.
+    runner-ready wrapping and the approval gate. ``observe`` is given to every
+    gated tool (see ``ToolResultObserver``).
     """
     session, mcp_tools = await open_mcp_session(stack, config, startup_timeout=startup_timeout)
 
@@ -315,7 +340,7 @@ async def start_mcp_server(
         runnable: BetaAsyncFunctionTool[Any] | ApprovalGatedTool = async_mcp_tool(mcp_tool, session)
         gated = bool(config.requires_approval(mcp_tool.name))
         if gated:
-            runnable = ApprovalGatedTool(runnable, server=config.name, approve=approve)
+            runnable = ApprovalGatedTool(runnable, server=config.name, approve=approve, observe=observe)
         tools.append(
             McpTool(server=config.name, name=mcp_tool.name, requires_approval=gated, runnable=runnable)
         )

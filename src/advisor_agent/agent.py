@@ -110,6 +110,7 @@ from .mcp_tools import (
     McpServerConfig,
     McpServerStartError,
     McpTool,
+    ToolResultObserver,
     cli_approval_callback,
     start_mcp_server,
 )
@@ -246,6 +247,7 @@ class AdvisorAgent:
         client: AsyncAnthropic | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         progress: ProgressCallback | None = None,
+        on_tool_result: ToolResultObserver | None = None,
     ):
         """
         Initialize the Advisor Agent.
@@ -263,6 +265,9 @@ class AdvisorAgent:
             progress: Receives one progress line at a time (server start,
                 model turns, tool calls). Defaults to printing them on
                 stderr; pass a function that does nothing to silence them.
+            on_tool_result: Told about each approved tool call that succeeded,
+                with its result (see ``ToolResultObserver``). Called on the
+                agent's loop thread, before ``query()`` returns.
 
         The API key is read from ``ANTHROPIC_API_KEY`` and is not a
         constructor argument. It is required unless ``client`` is given.
@@ -285,6 +290,7 @@ class AdvisorAgent:
             raise ValueError(f"Duplicate MCP server names: {names}")
         self._approval_callback: ApprovalCallback = approval_callback or cli_approval_callback
         self._progress: ProgressCallback = progress or print_progress
+        self._on_tool_result = on_tool_result
         self._api_key = api_key
         self._injected_client = client
 
@@ -559,7 +565,9 @@ When working with Advisor findings:
                 f"Starting MCP server '{config.name}' "
                 "(the first start can take a minute while its package is downloaded)..."
             )
-            server_tools = await start_mcp_server(stack, config, self._approval_callback)
+            server_tools = await start_mcp_server(
+                stack, config, self._approval_callback, observe=self._on_tool_result
+            )
             if not server_tools:
                 print(
                     f"Warning: MCP server '{config.name}' exposes no tools.",

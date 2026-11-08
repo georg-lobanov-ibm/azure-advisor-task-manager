@@ -304,6 +304,7 @@ def test_the_agent_is_built_with_the_approval_bridge_and_a_progress_hook(web):
     with web(agent_factory=factory) as app:
         assert agent.approval_callback == app.services.approvals.callback
         assert callable(agent.progress)
+        assert callable(agent.on_tool_result)  # how a created Story gets linked
 
 
 # -- the recommendation attached to a message -------------------------------------------------
