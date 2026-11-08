@@ -128,3 +128,23 @@ def test_the_script_parses():
     result = subprocess.run(["node", "--check", str(STATIC / "app.js")], capture_output=True, text=True, timeout=30)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_the_page_has_the_list_of_predefined_chats():
+    assert 'id="chat-presets"' in HTML and 'id="presets-row"' in HTML and 'id="presets-note"' in HTML
+    # The list and its note sit above the message box, inside the chat pane.
+    assert HTML.index('id="presets-row"') < HTML.index('id="chat-input"')
+
+
+def test_picking_a_predefined_chat_only_fills_the_message_box():
+    code = strip_comments(JS)
+    pick = re.search(r"function pickPredefined\(\) \{(.*?)\n  \}", code, flags=re.S)
+
+    assert pick, "no pickPredefined function in app.js"
+    body = pick.group(1)
+    assert "chat-input" in body and ".value = chat.prompt" in body
+    # Sending is a separate click: picking neither sends nor calls the server.
+    for forbidden in ("sendChat", "api(", "fetch(", "click()", "requestSubmit", ".submit("):
+        assert forbidden not in body, forbidden
+    # The placeholder (an empty value) must not be read as chat number 0.
+    assert "select.value === ''" in body

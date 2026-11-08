@@ -2,7 +2,8 @@
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+ (the web UI reads `chats.toml` with the standard library's
+  `tomllib` and uses `asyncio.timeout`; both arrived in 3.11)
 - pip or poetry
 - `uv` / `uvx` on PATH. It spawns the Azure MCP Server subprocess (the
   `msmcp-azure` package from PyPI, which bundles Microsoft's `azmcp` binary;
@@ -136,9 +137,12 @@ src/advisor_agent/
     ├── approvals.py        #   Jira write approvals: the browser's "yes" or "no"
     ├── events.py           #   server-sent events to the open page
     ├── storage.py          #   the database, used from one thread
+    ├── predefined.py       #   reads chats.toml for the list of predefined chats
     ├── settings.py         #   one run's settings; the Jira key and URL checks
     ├── errors.py           #   errors that are safe to show in the browser
     └── static/             #   index.html, app.js, app.css (no build step)
+
+chats.toml                  # The predefined chats of the web UI, edited by hand
 
 examples/
 ├── agent_sdk_demo.py       # Agent usage examples (file name kept; launch.json refers to it)
@@ -224,6 +228,35 @@ if it is taken the server says so and ends. Stop it with Ctrl-C.
   audit log (`jira_tool_approval` rows, with a hash of the arguments).
 * Closing and reopening the page loses nothing: the chat, the progress lines and
   waiting approvals are sent again when it reconnects.
+
+**Predefined chats**
+
+The "Predefined chats" list above the message box holds starter prompts. Picking
+one puts its text in the message box; you can edit it, and nothing is sent until
+you press Send. The agent still asks for your approval in the dialog before any
+Jira change.
+
+The list comes from `chats.toml` in the project root. Edit that file, then reload
+the page; the server does not need a restart. Each chat is a `[[chat]]` table
+with a title (the name in the list) and a prompt (the text for the message box):
+
+```toml
+[[chat]]
+title = "High-impact recommendations"
+prompt = """
+List the High-impact Azure Advisor recommendations and what to do about each.
+Do not create or change anything in Jira.
+"""
+```
+
+* A title is one line of at most 80 characters. A prompt has at most 8000
+  characters (the same limit as the message box); a `"""` block can span several
+  lines. At most 50 chats are used. Other keys are ignored.
+* A chat that is written wrongly is skipped, and the page names the problem under
+  the list (for example "chats.toml: chat 3 has no prompt."). The other chats
+  still work. If the whole file cannot be read, the list is empty and the page
+  says why.
+* If `chats.toml` does not exist, the list is not shown.
 
 **Security**
 

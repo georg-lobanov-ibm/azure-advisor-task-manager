@@ -74,6 +74,12 @@
           <ol id="progress" class="progress"></ol>
         </div>
         <p id="chat-note" class="note" role="status" hidden></p>
+        <div id="presets-row" class="presets" hidden>
+          <label class="field">Predefined chats
+            <select id="chat-presets"><option value="">Choose a predefined chat...</option></select>
+          </label>
+          <p id="presets-note" class="note" role="status" hidden></p>
+        </div>
         <div class="composer">
           <textarea id="chat-input" rows="2" maxlength="8000" placeholder="Ask about the recommendations (Enter to send, Shift+Enter for a new line)" aria-label="Message to the agent"></textarea>
           <button id="chat-send" type="button" disabled>Send</button>

@@ -108,6 +108,7 @@ def test_json_with_a_charset_is_accepted(web):
         ("GET", "/api/events"),
         ("GET", "/api/subscriptions"),
         ("GET", "/api/recommendations"),
+        ("GET", "/api/predefined"),
         ("GET", "/api/links"),
         ("PUT", "/api/links"),
         ("DELETE", "/api/links"),

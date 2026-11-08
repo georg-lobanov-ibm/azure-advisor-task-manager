@@ -1,0 +1,42 @@
+# Predefined chats for the web UI.
+#
+# Pick one in the chat panel: its prompt is put in the message box, you can edit
+# it, and nothing is sent until you press Send. Changes to this file show after
+# you reload the page; the server does not need a restart.
+#
+# Each [[chat]] needs
+#   title   the name shown in the list (one line, at most 80 characters)
+#   prompt  the text put in the message box (at most 8000 characters; a
+#           """ ... """ block can span several lines)
+#
+# A chat that is written wrongly is skipped and named under the list in the page;
+# the others still work. The agent asks for your approval in a dialog before any
+# Jira change, whatever the prompt says.
+#
+# To add a chat that writes to Jira, say so in the prompt, for example:
+#
+#   [[chat]]
+#   title = "Create a Jira issue for the top Security finding"
+#   prompt = "Find the highest-impact Security recommendation without a Jira issue and create one for it."
+
+[[chat]]
+title = "Open recommendations by category"
+prompt = """
+List the open Azure Advisor recommendations, grouped by category, with the number per impact level.
+Do not create or change anything in Jira.
+"""
+
+[[chat]]
+title = "High-impact recommendations"
+prompt = """
+Show the High-impact Azure Advisor recommendations that are still open. For each one give the category, the affected resource, the problem and the suggested solution.
+Do not create or change anything in Jira.
+"""
+
+[[chat]]
+title = "Plan Jira issues (proposal only)"
+prompt = """
+Look at the open High-impact Azure Advisor recommendations and check Jira for an existing issue for each one first.
+Then propose which recommendations need a new Jira issue, with a summary and a priority for each.
+Only propose: do not create or change anything in Jira yet.
+"""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 # A Jira issue key: project key, dash, number without leading zero. Used with
@@ -30,6 +31,8 @@ class Settings:
     session_secret: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     # Base URL of the Jira site (``JIRA_URL``), already checked by ``jira_base_url``.
     jira_base_url: str | None = None
+    # The file of predefined chats (``chats.toml``). None switches the feature off.
+    chats_file: Path | None = None
     # How long a Jira write may wait for a click, and how long a page reload may take.
     approval_timeout: float = 300.0
     approval_viewer_grace: float = 30.0

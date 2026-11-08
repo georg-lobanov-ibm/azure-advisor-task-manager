@@ -57,6 +57,7 @@
     linkError: '',
 
     chat: { enabled: false, reason: null, wedged: false, transcript: [], run: null, progress: [] },
+    predefined: [],
     sending: false,
     pendingMessage: null,
     chatError: '',
@@ -800,6 +801,7 @@
     const running = chat.run !== null;
     const input = $('chat-input');
     input.disabled = !usable || state.sending;
+    $('chat-presets').disabled = input.disabled;
     $('chat-send').disabled = !usable || running || state.sending || input.value.trim() === '';
     const cancel = $('chat-cancel');
     cancel.disabled = !running || (chat.run && chat.run.state === 'cancelling');
@@ -911,6 +913,54 @@
     } catch (error) {
       state.chatError = error.message;
       renderChatControls();
+    }
+  }
+
+  // -- predefined chats -----------------------------------------------------------------
+
+  // The list comes from chats.toml and is fetched on every page load. It only fills
+  // the message box: sending is always a separate click.
+  async function loadPredefined() {
+    let data = null;
+    let failure = '';
+    try {
+      data = await api('GET', '/api/predefined');
+    } catch (error) {
+      failure = 'Could not load predefined chats: ' + error.message;
+    }
+    const chats = data && Array.isArray(data.chats) ? data.chats : [];
+    const problems = data && Array.isArray(data.problems) ? data.problems.map(String) : [];
+    if (failure) problems.push(failure);
+    state.predefined = chats.filter(
+      (chat) => chat && typeof chat.title === 'string' && typeof chat.prompt === 'string',
+    );
+
+    const select = $('chat-presets');
+    select.replaceChildren(
+      el('option', { text: 'Choose a predefined chat...', attrs: { value: '' } }),
+      ...state.predefined.map((chat, index) => el('option', { text: chat.title, attrs: { value: String(index) } })),
+    );
+    // The list is hidden when there is nothing to pick, but problems are always shown.
+    select.parentElement.hidden = state.predefined.length === 0;
+    const note = $('presets-note');
+    note.replaceChildren(...problems.map((problem) => el('div', { text: problem })));
+    note.hidden = problems.length === 0;
+    $('presets-row').hidden = state.predefined.length === 0 && problems.length === 0;
+    renderChatControls();
+  }
+
+  function pickPredefined() {
+    const select = $('chat-presets');
+    const chat = select.value === '' ? null : state.predefined[Number(select.value)];
+    select.value = '';  // back to the placeholder, so the same chat can be picked again
+    if (!chat) return;
+    const input = $('chat-input');
+    input.value = chat.prompt;
+    // Setting the value from code fires no input event, so the Send button is updated here.
+    renderChatControls();
+    if (!input.disabled) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
     }
   }
 
@@ -1097,6 +1147,7 @@
     $('chat-send').addEventListener('click', sendChat);
     $('chat-cancel').addEventListener('click', cancelChat);
     $('chat-reset').addEventListener('click', resetChat);
+    $('chat-presets').addEventListener('change', pickPredefined);
 
     const dialog = $('approval-dialog');
     $('approval-approve').addEventListener('click', () => decideApproval(true));
@@ -1141,6 +1192,7 @@
     }
     showApp();
     connect();
+    loadPredefined();  // not awaited: the page does not wait for the list
   }
 
   boot();
