@@ -67,6 +67,7 @@ class FakeAgent:
         self.closed = threading.Event()
         self.approval_callback: Any = None
         self.progress: Callable[[str], None] = lambda line: None
+        self.on_tool_result: Callable[[Any, Any], None] = lambda request, result: None
 
     def query(self, prompt: str) -> str:
         self.prompts.append(prompt)
@@ -94,13 +95,16 @@ class FakeAgent:
         self.closed.set()
 
 
-def fake_agent(**kwargs: Any) -> tuple[FakeAgent, Callable[[Any, Any], FakeAgent]]:
+def fake_agent(**kwargs: Any) -> tuple[FakeAgent, Callable[[Any, Any, Any], FakeAgent]]:
     """A ``FakeAgent`` and the agent factory that hands it to the app."""
     agent = FakeAgent(**kwargs)
 
-    def factory(approval_callback: Any, progress: Callable[[str], None]) -> FakeAgent:
+    def factory(
+        approval_callback: Any, progress: Callable[[str], None], on_tool_result: Callable[[Any, Any], None]
+    ) -> FakeAgent:
         agent.approval_callback = approval_callback
         agent.progress = progress
+        agent.on_tool_result = on_tool_result
         return agent
 
     return agent, factory
@@ -239,7 +243,7 @@ class Web:
 def running_web(
     tmp_path,
     *,
-    agent_factory: Callable[[Any, Any], Any],
+    agent_factory: Callable[[Any, Any, Any], Any],
     azure_config: McpServerConfig,
     signed_in: bool = True,
     azure_options: dict[str, Any] | None = None,

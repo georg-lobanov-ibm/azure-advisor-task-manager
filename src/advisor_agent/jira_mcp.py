@@ -34,7 +34,9 @@ Credentials are optional at this layer: if they aren't configured,
 this server.
 """
 
+import json
 import os
+from typing import Any
 
 from mcp import StdioServerParameters
 
@@ -60,6 +62,51 @@ JIRA_READ_TOOLS = frozenset(
 def jira_requires_approval(tool_name: str) -> bool:
     """True for every Jira tool that is not a known read tool."""
     return tool_name not in JIRA_READ_TOOLS
+
+
+# The mcp-atlassian tool that creates one issue. Its arguments include
+# ``issue_type`` ("Story", "Task", ...); its answer is JSON text like
+# ``{"message": "Issue created successfully", "issue": {"key": "ABC-123", ...}}``.
+JIRA_CREATE_ISSUE_TOOL = "jira_create_issue"
+
+# A create answer is a few KB; anything far larger is not one and is not parsed.
+_MAX_RESULT_CHARS = 1_000_000
+
+
+def created_issue_key(result: Any) -> str | None:
+    """The key of the issue in the answer of ``jira_create_issue``, or ``None``.
+
+    ``result`` is what the tool runner got back from the server: the JSON
+    text itself, or a list of content blocks (``{"type": "text", "text": ...}``)
+    holding it. The key is returned as it is, unchecked; anything that does not
+    look like a create answer gives ``None``.
+    """
+    if isinstance(result, str):
+        text = result
+    elif isinstance(result, list):
+        parts = [
+            block.get("text")
+            for block in result
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        if not all(isinstance(part, str) for part in parts):
+            return None
+        text = "".join(parts)
+    else:
+        return None
+    if len(text) > _MAX_RESULT_CHARS:
+        return None
+    try:
+        answer = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(answer, dict):
+        return None
+    issue = answer.get("issue", answer)  # a bare issue object is accepted too
+    if not isinstance(issue, dict):
+        return None
+    key = issue.get("key")
+    return key if isinstance(key, str) else None
 
 
 def jira_server_config() -> McpServerConfig | None:

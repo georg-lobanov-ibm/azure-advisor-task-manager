@@ -363,7 +363,7 @@ def test_a_page_opened_later_gets_the_waiting_request_in_its_snapshot(web):
 
 
 def jira_agent_factory(model, jira, tmp_path):
-    def factory(approval_callback, progress):
+    def factory(approval_callback, progress, on_tool_result):
         return AdvisorAgent(
             model="claude-test",
             workspace_dir=str(tmp_path / "agent-workspace"),
@@ -371,6 +371,7 @@ def jira_agent_factory(model, jira, tmp_path):
             client=model.client(),
             approval_callback=approval_callback,
             progress=progress,
+            on_tool_result=on_tool_result,
         )
 
     return factory

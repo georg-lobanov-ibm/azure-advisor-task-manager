@@ -75,7 +75,7 @@ def backends(directory: Path, *, azure_switches: dict[str, str] | None = None) -
 
 
 def agent_factory(parts: Backends):
-    def factory(approval_callback, progress):
+    def factory(approval_callback, progress, on_tool_result):
         model = ScriptedModel([tool_use(WRITE_TOOL, WRITE_ARGS), text("done")])
         return AdvisorAgent(
             model="claude-test",
@@ -84,6 +84,7 @@ def agent_factory(parts: Backends):
             client=model.client(),
             approval_callback=approval_callback,
             progress=progress,
+            on_tool_result=on_tool_result,
         )
 
     return factory

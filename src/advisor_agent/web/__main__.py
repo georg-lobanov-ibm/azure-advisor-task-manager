@@ -58,12 +58,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def make_agent_factory(model: str, workspace: Path) -> AgentFactory:
-    def factory(approval_callback: Any, progress: Any) -> AdvisorAgent:
+    def factory(approval_callback: Any, progress: Any, on_tool_result: Any) -> AdvisorAgent:
         return AdvisorAgent(
             model=model,
             workspace_dir=str(workspace),
             approval_callback=approval_callback,
             progress=progress,
+            on_tool_result=on_tool_result,
         )
 
     return factory

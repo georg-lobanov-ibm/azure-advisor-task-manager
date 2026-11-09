@@ -9,6 +9,17 @@ below is touched on that loop only.
 Progress lines are queued by the agent's loop thread *before* ``query`` returns,
 and the end of the run is queued after it, so a page always sees the lines of a
 run before its answer.
+
+Linking a created Story
+-----------------------
+When a recommendation is attached to a message and the agent, with the person's
+approval, creates a Jira Story, the Story is linked to that recommendation
+(``links.create_link``, the code behind the Link button). The agent's loop
+thread reports each such call the same way it reports progress, so it is
+handled on the UI loop while the run still exists. Only the first Story of a
+message is linked, and a recommendation that already has a link keeps it. The
+transcript gets a note for the link and for every Story that was not linked;
+a failure to link never fails the run.
 """
 
 from __future__ import annotations
@@ -24,10 +35,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..agent import QueryCancelledError
-from .context import attached_context
+from ..jira_mcp import JIRA_CREATE_ISSUE_TOOL, JIRA_SERVER_NAME, created_issue_key
+from ..mcp_tools import ApprovalRequest
+from .context import LinkTarget, attached_context, link_target
 from .errors import ApiError, clean_line, safe_error
 from .events import EventHub
-from .settings import Settings
+from .links import LINK_AUDIT_AUTO, create_link, public_link
+from .settings import Settings, valid_jira_key
+from .storage import Storage
 
 log = logging.getLogger("advisor_agent.web")
 
@@ -37,10 +52,11 @@ MAX_PROGRESS_CHARS = 500
 MAX_TRANSCRIPT_ENTRIES = 200
 MAX_ANSWER_CHARS = 200_000
 _CANCEL_REPEAT_SECONDS = 1.0
+_LINK_TASKS_CLOSE_SECONDS = 5.0
 _MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
-# (approval_callback, progress) -> an AdvisorAgent (or anything shaped like one)
-AgentFactory = Callable[[Any, Callable[[str], None]], Any]
+# (approval_callback, progress, on_tool_result) -> an AdvisorAgent (or anything shaped like one)
+AgentFactory = Callable[[Any, Callable[[str], None], Callable[[ApprovalRequest, Any], None]], Any]
 
 
 @dataclass
@@ -50,6 +66,11 @@ class Run:
     state: str = "running"  # running | cancelling
     cancel_requested: threading.Event = field(default_factory=threading.Event)
     cancelled_at: float | None = None
+    # A recommendation was attached to the message, and the finding it names
+    # (None if it cannot be linked). Stories the agent creates are linked to it.
+    attached: bool = False
+    link_target: LinkTarget | None = None
+    story_seen: bool = False  # a Story was created in this run: later ones are not linked
 
     def public(self) -> dict[str, Any]:
         return {"id": self.id, "state": self.state}
@@ -63,10 +84,12 @@ class ChatSession:
         ui_loop: asyncio.AbstractEventLoop,
         agent_factory: AgentFactory,
         approval_callback: Any,
+        storage: Storage,
     ) -> None:
         self._settings = settings
         self._hub = hub
         self._ui_loop = ui_loop
+        self._storage = storage
         self._agent: Any = None
         self.disabled_reason: str | None = None
         self._transcript: list[dict[str, Any]] = []
@@ -74,12 +97,16 @@ class ChatSession:
         self._run: Run | None = None
         self._run_ids = 0
         self._entry_ids = 0
+        self._generation = 0  # counts resets: a late note for a forgotten conversation is dropped
+        self._link_tasks: set[asyncio.Task[None]] = set()
         self._last_message: tuple[str, int] | None = None  # (client_msg_id, run id)
         self.wedged = False
         self._shutdown = False
 
         try:
-            self._agent = agent_factory(approval_callback, self._on_agent_progress)
+            self._agent = agent_factory(
+                approval_callback, self._on_agent_progress, self._on_tool_result
+            )
         except Exception as exc:
             log.warning("Chat is disabled: %s", exc)
             self.disabled_reason = clean_line(str(exc)) or safe_error(exc)
@@ -142,7 +169,12 @@ class ChatSession:
             raise ApiError(409, "The agent is still working on the previous message.")
 
         self._run_ids += 1
-        run = Run(id=self._run_ids, client_msg_id=client_msg_id)
+        run = Run(
+            id=self._run_ids,
+            client_msg_id=client_msg_id,
+            attached=attached is not None,
+            link_target=link_target(context) if attached is not None else None,
+        )
         self._run = run
         self._last_message = (client_msg_id, run.id)
         self._progress.clear()
@@ -209,6 +241,86 @@ class ChatSession:
             self._progress.append(line)
             self._hub.publish("chat_progress", {"run_id": self._run.id, "line": line})
 
+    # -- a Story the agent created ------------------------------------------------------
+
+    def _on_tool_result(self, request: ApprovalRequest, result: Any) -> None:
+        """Called on the agent's loop thread after an approved tool call succeeded.
+
+        Hands a created Story over to the UI loop; everything else is ignored.
+        """
+        if request.server != JIRA_SERVER_NAME or request.tool != JIRA_CREATE_ISSUE_TOOL:
+            return
+        issue_type = request.arguments.get("issue_type")
+        if not isinstance(issue_type, str) or issue_type.strip().casefold() != "story":
+            return
+        key = created_issue_key(result)
+        try:
+            self._ui_loop.call_soon_threadsafe(self._story_created, key)
+        except RuntimeError:
+            pass  # the web server's loop has stopped
+
+    def _story_created(self, key: str | None) -> None:
+        """Link the Story ``key`` to the attached recommendation, or say why it is not linked.
+
+        ``key`` is what Jira answered, unchecked. The call was queued before the
+        end of its run is, so ``self._run`` is the run that made it.
+        """
+        run = self._run
+        if run is None or not run.attached:
+            return
+        name = key if valid_jira_key(key) else "A Story"
+        first = not run.story_seen
+        run.story_seen = True
+        if not first:
+            self._add_note(
+                f"{name} was created but not linked: only the first Story of a message is linked."
+            )
+        elif not valid_jira_key(key):
+            self._add_note(
+                "A Story was created, but its key could not be read from Jira's answer. "
+                "Link it by hand."
+            )
+        elif run.link_target is None:
+            self._add_note(
+                f"{key} was created but not linked: the attached recommendation cannot be linked."
+            )
+        else:
+            assert key is not None
+            task = asyncio.ensure_future(self._link_story(key, run.link_target, self._generation))
+            self._link_tasks.add(task)
+            task.add_done_callback(self._link_tasks.discard)
+
+    async def _link_story(self, key: str, target: LinkTarget, generation: int) -> None:
+        try:
+            mapping = await self._storage.run(
+                create_link,
+                self._storage.db,
+                target.recommendation_type_id,
+                target.resource_id,
+                key,
+                target.advisor_id,
+                target.category,
+                target.impact,
+                target.subscription_id,
+                action=LINK_AUDIT_AUTO,
+                rationale="Story created by the agent after approval in the web UI",
+                source="web_ui_agent",
+            )
+        except ApiError as exc:
+            text = f"{key} was created but not linked: {clean_line(exc.message)}"
+        except Exception:
+            log.exception("Could not link the Story %s to its recommendation", key)
+            text = f"{key} was created but could not be linked. Link it by hand."
+        else:
+            self._hub.publish("link_changed", {"link": public_link(mapping), "removed": False})
+            text = f"Linked {key} to the attached recommendation."
+        if generation == self._generation:
+            self._add_note(text)
+
+    def _add_note(self, text: str) -> None:
+        entry = self._entry("note", text)
+        self._hub.publish("chat_entry", {"entry": entry})
+
     # -- cancel, reset, shutdown --------------------------------------------------------
 
     def cancel(self) -> bool:
@@ -249,6 +361,7 @@ class ChatSession:
             raise ApiError(409, "Wait for the running message to finish, or cancel it, first.")
         if self._agent is not None:
             self._agent.reset_conversation()
+        self._generation += 1
         self._transcript.clear()
         self._progress.clear()
         self._last_message = None
@@ -262,6 +375,8 @@ class ChatSession:
 
     async def close(self) -> None:
         """Close the agent (its servers and loop) without blocking this loop for ever."""
+        if self._link_tasks:  # a link being written is quick; let it finish before the database closes
+            await asyncio.wait(set(self._link_tasks), timeout=_LINK_TASKS_CLOSE_SECONDS)
         agent, self._agent = self._agent, None
         if agent is None:
             return
